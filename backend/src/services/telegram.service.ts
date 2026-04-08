@@ -155,20 +155,29 @@ class TelegramService {
   async initialize() {
     const config = await getConfig();
 
-    if (!config.telegram.apiId || !config.telegram.apiHash) {
-      console.warn('[Telegram] API credentials not configured');
+    // Check environment variables first (for Render deployment), fall back to config
+    const apiId = process.env.TELEGRAM_API_ID || config.telegram.apiId;
+    const apiHash = process.env.TELEGRAM_API_HASH || config.telegram.apiHash;
+
+    if (!apiId || !apiHash) {
+      console.warn('[Telegram] API credentials not configured (check env vars or config.json)');
       return;
     }
 
-    const apiId = parseInt(config.telegram.apiId, 10);
-    const apiHash = config.telegram.apiHash;
+    // Use env var phone number if available, otherwise from config
+    const configPhone = process.env.TELEGRAM_PHONE || config.telegram.phoneNumber || '';
+
+    console.log(`[Telegram] Loading credentials from ${process.env.TELEGRAM_API_ID ? 'environment variables' : 'config file'}`);
+
+    const apiIdNum = parseInt(apiId, 10);
+    const apiHashStr = apiHash;
 
     // Migrate session from config to session file if needed
     if (config.telegram.sessionString && config.telegram.sessionString.length > 0) {
       console.log('[Telegram] Migrating session from config to session file...');
       try {
         await migrateSessionFromConfig(config.telegram.sessionString, config.telegram.phoneNumber);
-        
+
         // Clear session string from config after migration
         config.telegram.sessionString = '';
         await updateConfig({ telegram: config.telegram });
@@ -193,7 +202,7 @@ class TelegramService {
 
     console.log('[Telegram] Initializing client' + (savedSession ? ' with saved session' : '') + '...');
 
-    this.client = new TelegramClient(stringSession, apiId, apiHash, {
+    this.client = new TelegramClient(stringSession, apiIdNum, apiHashStr, {
       connectionRetries: 10,
       autoReconnect: true,
       timeout: 20000, // 20 second timeout for individual requests
@@ -210,7 +219,7 @@ class TelegramService {
         'Connection to Telegram'
       );
       console.log('[Telegram] Connected successfully');
-      
+
       // Update auth state if session loaded
       if (savedSession) {
         this.authState = 'authenticated';
@@ -222,7 +231,7 @@ class TelegramService {
       if (error.message && error.message.includes('AUTH_KEY_UNREGISTERED')) {
         console.warn('[Telegram] Session expired, clearing from session file');
         await clearSession();
-        
+
         // Also update config auth state
         const updatedConfig = await getConfig();
         updatedConfig.telegram.isAuthenticated = false;
@@ -259,9 +268,10 @@ class TelegramService {
 
       console.log('[Telegram] Sending verification code request...');
 
+      // Use env vars for sendCode, fall back to config
       const config = await getConfig();
-      const apiId = parseInt(config.telegram.apiId, 10);
-      const apiHash = config.telegram.apiHash;
+      const apiId = parseInt(process.env.TELEGRAM_API_ID || config.telegram.apiId, 10);
+      const apiHash = process.env.TELEGRAM_API_HASH || config.telegram.apiHash;
 
       // sendCode() requires connected client
       const result = await this.withTimeout(
@@ -316,9 +326,10 @@ class TelegramService {
 
       console.log('[Telegram] Signing in with verification code...');
 
+      // Use env vars for signInUser, fall back to config
       const config = await getConfig();
-      const apiId = parseInt(config.telegram.apiId, 10);
-      const apiHash = config.telegram.apiHash;
+      const apiId = parseInt(process.env.TELEGRAM_API_ID || config.telegram.apiId, 10);
+      const apiHash = process.env.TELEGRAM_API_HASH || config.telegram.apiHash;
 
       // Sign in with the code using GramJS signInUser method
       const signInResult = await this.withTimeout(

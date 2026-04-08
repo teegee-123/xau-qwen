@@ -227,7 +227,42 @@ const DEFAULT_CONFIG: Config = {
 
 export async function getConfig(): Promise<Config> {
   try {
-    return await readJsonFile<Config>(CONFIG_FILE);
+    let config = await readJsonFile<Config>(CONFIG_FILE);
+
+    // Merge environment variables (for Render deployment and local .env)
+    // Env vars take priority over config.json values
+    if (process.env.TELEGRAM_API_ID) {
+      config.telegram.apiId = process.env.TELEGRAM_API_ID;
+    }
+    if (process.env.TELEGRAM_API_HASH) {
+      config.telegram.apiHash = process.env.TELEGRAM_API_HASH;
+    }
+    if (process.env.TELEGRAM_PHONE) {
+      config.telegram.phoneNumber = process.env.TELEGRAM_PHONE;
+    }
+    if (process.env.OANDA_ACCOUNT_ID) {
+      config.oanda.accountId = process.env.OANDA_ACCOUNT_ID;
+    }
+    if (process.env.OANDA_TOKEN) {
+      config.oanda.token = process.env.OANDA_TOKEN;
+    }
+    if (process.env.OANDA_ENVIRONMENT) {
+      config.oanda.environment = process.env.OANDA_ENVIRONMENT as 'practice' | 'live';
+    }
+    if (process.env.TRADING_LOT_SIZE) {
+      config.trading.lotSize = parseFloat(process.env.TRADING_LOT_SIZE);
+    }
+    if (process.env.TRADING_SYMBOL) {
+      config.trading.symbol = process.env.TRADING_SYMBOL;
+    }
+    if (process.env.TRADING_CLOSE_TIMEOUT_MINUTES) {
+      config.trading.closeTimeoutMinutes = parseInt(process.env.TRADING_CLOSE_TIMEOUT_MINUTES);
+    }
+    if (process.env.TELEGRAM_CHANNELS) {
+      config.telegram.channels = process.env.TELEGRAM_CHANNELS.split(',').map(c => c.trim()).filter(c => c);
+    }
+
+    return config;
   } catch (error) {
     // File doesn't exist or is invalid, create default
     console.log('Creating default config.json');
