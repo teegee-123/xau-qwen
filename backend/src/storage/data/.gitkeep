@@ -1,0 +1,3 @@
+# This file ensures the data directory is tracked by git
+# JSON files (config.json, trades.json, logs.json) are gitignored
+# They are auto-created on first run with defaults

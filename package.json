@@ -1,0 +1,16 @@
+{
+  "name": "xau-copy-trade",
+  "version": "1.0.0",
+  "private": true,
+  "description": "XAU Copy Trade - Automated Telegram to OANDA trading system",
+  "scripts": {
+    "start-app": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev": "npm run start-app",
+    "dev:backend": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev",
+    "install:all": "npm install && cd backend && npm install && cd ../frontend && npm install"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

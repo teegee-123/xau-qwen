@@ -1,0 +1,30 @@
+# Build artifacts
+coverage/
+*.log
+.DS_Store
+
+# Test files
+tests/
+*.test.ts
+*.test.js
+jest.config.js
+tsconfig.test.json
+
+# Documentation
+README.md
+TESTING-GUIDE.md
+TESTING-PROMPT.md
+FIXES-APPLIED.md
+QWEN.md
+
+# Dev scripts
+diagnostic.bat
+start-dev.bat
+
+# IDE
+.vscode/
+.idea/
+
+# Root-level npm artifacts (if any)
+package-lock.json
+node_modules/
