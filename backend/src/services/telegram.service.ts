@@ -27,6 +27,10 @@ class TelegramService {
   private baseReconnectDelay = 1000; // 1 second
   private isRunning = false;
 
+  // Store bound handlers to ensure proper removal (fixes duplicate message handling)
+  private boundNewMessageHandler: any = null;
+  private boundEditedMessageHandler: any = null;
+
   /**
    * Wraps an operation with timeout to prevent hanging
    */
@@ -376,26 +380,31 @@ class TelegramService {
       if (this.sessionInstance && typeof this.sessionInstance.save === 'function') {
         try {
           const sessionString = this.sessionInstance.save();
-          
+
           // Save to dedicated session file
           await saveSession({
             sessionString,
             phoneNumber: this.phoneNumber
           });
-          
-          // Also update config auth state (but don't store session string in config anymore)
-          const updatedConfig = await getConfig();
-          updatedConfig.telegram.isAuthenticated = true;
-          updatedConfig.telegram.authState = 'authenticated';
-          updatedConfig.telegram.phoneNumber = this.phoneNumber || '';
-          updatedConfig.telegram.sessionString = ''; // Clear from config, use session file
-          await updateConfig({ telegram: updatedConfig.telegram });
         } catch (saveError: any) {
-          console.error('[Telegram] Failed to save session:', saveError.message);
-          // Don't fail authentication if session save fails - config will be cleared on next restart
+          console.error('[Telegram] Failed to save session file:', saveError.message);
+          // Continue anyway - we still need to update config.json
         }
       } else {
         console.warn('[Telegram] Session instance not available or save method missing - auth will work but session won\'t persist');
+      }
+
+      // ALWAYS update config auth state so the UI and listener can see the change
+      try {
+        const updatedConfig = await getConfig();
+        updatedConfig.telegram.isAuthenticated = true;
+        updatedConfig.telegram.authState = 'authenticated';
+        updatedConfig.telegram.phoneNumber = this.phoneNumber || '';
+        updatedConfig.telegram.sessionString = ''; // Clear from config, use session file
+        await updateConfig({ telegram: updatedConfig.telegram });
+        console.log('[Telegram] Config updated: isAuthenticated=true, authState=authenticated');
+      } catch (configError: any) {
+        console.error('[Telegram] Failed to update config auth state:', configError.message);
       }
 
       this.authState = 'authenticated';
@@ -597,10 +606,12 @@ class TelegramService {
       console.log('[Telegram] Registering NewMessage event handler...');
       console.log('[Telegram] Channels to listen to:', channels);
 
+      // Store bound handler in property to ensure we can remove it later
+      this.boundNewMessageHandler = this.handleNewMessageEvent.bind(this);
+
       // Pass channel IDs as strings - GramJS _intoIdSet handles these natively
-      // by converting to BigInt and creating PeerChannel/PeerUser/PeerChat objects
       this.client.addEventHandler(
-        this.handleNewMessageEvent.bind(this),
+        this.boundNewMessageHandler, // Use stored property
         new NewMessage({
           chats: channels, // Pass string channel IDs: ["-1001222394814", "-1003731832656"]
           incoming: true
@@ -611,8 +622,9 @@ class TelegramService {
 
       // Register EditedMessage event handler
       console.log('[Telegram] Registering EditedMessage event handler...');
+      this.boundEditedMessageHandler = this.handleEditedMessageEvent.bind(this); // Store bound handler
       this.client.addEventHandler(
-        this.handleEditedMessageEvent.bind(this),
+        this.boundEditedMessageHandler, // Use stored property
         new EditedMessage({
           chats: channels, // Pass string channel IDs
         })
@@ -649,10 +661,14 @@ class TelegramService {
       // Stop keep-alive ping
       this.stopKeepAlive();
 
-      // Remove event handlers (GramJS will clean them up)
+      // Remove event handlers using the SAME references used in addEventHandler
       if (this.client) {
-        this.client.removeEventHandler(this.handleNewMessageEvent.bind(this), new NewMessage({}));
-        this.client.removeEventHandler(this.handleEditedMessageEvent.bind(this), new EditedMessage({}));
+        if (this.boundNewMessageHandler) {
+            this.client.removeEventHandler(this.boundNewMessageHandler, new NewMessage({}));
+        }
+        if (this.boundEditedMessageHandler) {
+            this.client.removeEventHandler(this.boundEditedMessageHandler, new EditedMessage({}));
+        }
         console.log('[Telegram] Event handlers removed');
       }
 

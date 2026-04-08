@@ -22,9 +22,21 @@ class TelegramListenerWorker {
     try {
       const config = await getConfig();
 
-      // Validate authentication
-      if (!config.telegram.isAuthenticated || config.telegram.authState !== 'authenticated') {
-        throw new Error('Telegram not authenticated. Please authenticate via the dashboard Config tab first.');
+      // Verify Telegram client is initialized and connected
+      const client = telegramService.getClient();
+      if (!client) {
+        throw new Error('Telegram client not initialized. Please authenticate via the dashboard Config tab first.');
+      }
+
+      // Check actual connection state instead of relying on stale config flags
+      if (!client.connected) {
+        await logger.log('message_ignored', 'Telegram client is not connected. Attempting to connect...');
+        try {
+            await client.connect();
+            console.log('[Listener] Successfully connected Telegram client.');
+        } catch (connError: any) {
+            throw new Error(`Telegram connection failed: ${connError.message}. Please re-authenticate.`);
+        }
       }
 
       // Validate channels are configured
@@ -32,17 +44,7 @@ class TelegramListenerWorker {
         throw new Error('No Telegram channels configured. Add channel IDs in the dashboard Config tab.');
       }
 
-      // Verify Telegram client is initialized
-      const client = telegramService.getClient();
-      if (!client) {
-        throw new Error('Telegram client not initialized. Please re-authenticate in the dashboard.');
-      }
-
-      // Verify client is connected
-      if (!client.connected) {
-        await logger.log('message_received', 'Telegram client not connected, attempting to connect...');
-        await client.connect();
-      }
+      console.log('[Listener] Telegram client is connected and ready to start listener.');
 
       // Register message handler
       console.log('[Listener] Registering onMessage callback with telegramService...');
