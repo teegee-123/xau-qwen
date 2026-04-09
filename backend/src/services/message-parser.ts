@@ -19,8 +19,11 @@ interface EditedSignal {
 
 class MessageParser {
   // Default regex patterns (can be overridden by config)
-  // [^\d]*? allows ANY non-digit characters (emojis, icons, spaces, newlines) between keyword and number
-  private defaultInitialRegex = /Gold\s+buy\s+([\d.]+)/i;
+  // STRICT: Only matches "Gold buy {price}" with optional whitespace, nothing else
+  // ^ and $ anchors ensure the ENTIRE message is just the signal
+  // \s* allows optional whitespace at start/end
+  // (\d+(?:\.\d+)?) captures integer or decimal price
+  private defaultInitialRegex = /^\s*Gold\s+buy\s+(\d+(?:\.\d+)?)\s*$/i;
   private defaultEditedRegex = /gold\s+buy\s+now/i;
   private defaultEntryRegex = /Buy\s*@\s*([\d.]+)\s*-\s*([\d.]+)/i;
   private defaultSLRegex = /SL[^\d]*?([\d.]+)/i;  // Matches SL{any-icon}number
@@ -72,28 +75,31 @@ class MessageParser {
   }
 
   /**
-   * Check if message should be ignored
+   * Check if message should be ignored.
+   * With strict regex, only messages that exactly match "Gold buy {price}" are accepted.
+   * This function provides additional rejection for sell-only or non-gold messages.
    */
   shouldIgnore(text: string): boolean {
-    // Ignore if contains sell (but not if it also contains buy)
+    // Ignore if contains sell and no buy
     const hasSell = text.toLowerCase().includes('sell');
     const hasBuy = text.toLowerCase().includes('buy');
     const hasGold = text.toLowerCase().includes('gold') || text.toLowerCase().includes('xau');
 
-    const shouldIgnore = (hasSell && !hasBuy) || !hasGold;
-    
     console.log('[MessageParser] shouldIgnore - Text:', text.substring(0, 100));
     console.log('[MessageParser] shouldIgnore - hasSell:', hasSell, 'hasBuy:', hasBuy, 'hasGold:', hasGold);
-    console.log('[MessageParser] shouldIgnore - Result:', shouldIgnore);
 
-    // Only ignore if it has sell but no buy, or no gold/xau at all
+    // Ignore sell-only messages
     if (hasSell && !hasBuy) {
+      console.log('[MessageParser] shouldIgnore - Result: true (sell only)');
       return true;
     }
+    // Ignore messages without gold/xau
     if (!hasGold) {
+      console.log('[MessageParser] shouldIgnore - Result: true (no gold/xau)');
       return true;
     }
 
+    console.log('[MessageParser] shouldIgnore - Result: false (may match)');
     return false;
   }
 

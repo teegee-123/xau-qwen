@@ -17,14 +17,55 @@ describe('Message Parser', () => {
       const result2 = await messageParser.parseInitialMessage('gold buy 4500');
       expect(result2).not.toBeNull();
       expect(result2?.price).toBe(4500);
+
+      const result3 = await messageParser.parseInitialMessage('Gold Buy 4500');
+      expect(result3).not.toBeNull();
+      expect(result3?.price).toBe(4500);
     });
 
-    it('should match any price number', async () => {
+    it('should match with leading/trailing whitespace', async () => {
+      const result1 = await messageParser.parseInitialMessage('  Gold buy 4617');
+      expect(result1).not.toBeNull();
+      expect(result1?.price).toBe(4617);
+
+      const result2 = await messageParser.parseInitialMessage('Gold buy 4617  ');
+      expect(result2).not.toBeNull();
+      expect(result2?.price).toBe(4617);
+
+      const result3 = await messageParser.parseInitialMessage('  Gold buy 4617  ');
+      expect(result3).not.toBeNull();
+      expect(result3?.price).toBe(4617);
+    });
+
+    it('should match any price number (integer or decimal)', async () => {
       const result1 = await messageParser.parseInitialMessage('Gold buy 4500');
       expect(result1?.price).toBe(4500);
 
       const result2 = await messageParser.parseInitialMessage('Gold buy 4700.50');
       expect(result2?.price).toBe(4700.50);
+
+      const result3 = await messageParser.parseInitialMessage('Gold buy 4617.5');
+      expect(result3?.price).toBe(4617.5);
+    });
+
+    it('should reject messages with extra text before the signal', async () => {
+      const result1 = await messageParser.parseInitialMessage('HIT TP Gold buy 4617');
+      expect(result1).toBeNull();
+
+      const result2 = await messageParser.parseInitialMessage('⚡️ Gold buy 4617');
+      expect(result2).toBeNull();
+
+      const result3 = await messageParser.parseInitialMessage('Gold buy 4617 now!');
+      expect(result3).toBeNull();
+
+      const result4 = await messageParser.parseInitialMessage('Gold buy 4617 extra text');
+      expect(result4).toBeNull();
+    });
+
+    it('should reject noisy promotional messages', async () => {
+      const promo = 'HIT TP**⚡️⚡️ Gold Buy 140+ **Pips **✔️ Gold Buy 120+ **Pips **✔️ Collect all';
+      const result = await messageParser.parseInitialMessage(promo);
+      expect(result).toBeNull();
     });
 
     it('should reject sell signals', async () => {
@@ -39,6 +80,11 @@ describe('Message Parser', () => {
 
     it('should reject messages without price', async () => {
       const result = await messageParser.parseInitialMessage('Gold buy');
+      expect(result).toBeNull();
+    });
+
+    it('should reject messages with only "Gold buy" and no number', async () => {
+      const result = await messageParser.parseInitialMessage('Gold buy now');
       expect(result).toBeNull();
     });
   });

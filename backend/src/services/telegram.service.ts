@@ -961,7 +961,7 @@ class TelegramService {
       console.log(`[Telegram] Fetched ${messages.length} messages from ${channelId}`);
 
       const results = messages.map(msg => {
-        const text = msg.message || '';
+        const text = typeof msg.message === 'string' ? msg.message : '';
         const isEdited = !!msg.editDate;
 
         // Log raw and cleaned text for debugging

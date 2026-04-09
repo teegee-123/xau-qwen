@@ -308,17 +308,24 @@ class TradeManager {
             console.log(`[TradeManager] handleTimeout - Trade already closed, calculated PnL: ${pnl.toFixed(2)}`);
           }
 
+          // Capture peak price even for already-closed trades
+          const peakPrice = priceService.getTradePeakPrice(tradeId);
+
           const updatedTrade = await updateTrade(tradeId, {
             status: 'CLOSED',
             closeTime: new Date().toISOString(),
             closePrice,
             pnl,
-            pnlPercent: trade.entryPrice > 0 ? (pnl / (trade.entryPrice * trade.lotSize)) * 100 : 0
+            pnlPercent: trade.entryPrice > 0 ? (pnl / (trade.entryPrice * trade.lotSize)) * 100 : 0,
+            peakPrice: peakPrice || undefined
           });
 
           if (updatedTrade) {
             this.activeTrades.delete(tradeId);
           }
+
+          // Clean up peak price tracking
+          priceService.removeTradePeakPrice(tradeId);
 
           this.pendingTrades.delete(messageId);
           await logger.tradeClosed(updatedTrade || trade);
@@ -327,18 +334,24 @@ class TradeManager {
           console.error(`[TradeManager] handleTimeout - Failed to fetch current price:`, priceError.message);
         }
 
-        // Fallback
+        // Fallback - still capture peak price
+        const peakPrice = priceService.getTradePeakPrice(tradeId);
+
         const updatedTrade = await updateTrade(tradeId, {
           status: 'CLOSED',
           closeTime: new Date().toISOString(),
           closePrice: trade.entryPrice,
           pnl: 0,
-          pnlPercent: 0
+          pnlPercent: 0,
+          peakPrice: peakPrice || undefined
         });
 
         if (updatedTrade) {
           this.activeTrades.delete(tradeId);
         }
+
+        // Clean up peak price tracking
+        priceService.removeTradePeakPrice(tradeId);
 
         this.pendingTrades.delete(messageId);
         await logger.tradeClosed(updatedTrade || trade);
@@ -381,6 +394,9 @@ class TradeManager {
       if (updatedTrade) {
         this.activeTrades.delete(tradeId);
       }
+
+      // Clean up peak price tracking
+      priceService.removeTradePeakPrice(tradeId);
 
       this.pendingTrades.delete(messageId);
 
@@ -433,17 +449,24 @@ class TradeManager {
             console.warn(`[TradeManager] Could not fetch current price for ${trade.symbol}, using entry price`);
           }
 
+          // Capture peak price even for already-closed trades
+          const peakPrice = priceService.getTradePeakPrice(tradeId);
+
           const updatedTrade = await updateTrade(tradeId, {
             status: 'CLOSED',
             closeTime: new Date().toISOString(),
             closePrice,
             pnl,
-            pnlPercent: trade.entryPrice > 0 ? (pnl / (trade.entryPrice * trade.lotSize)) * 100 : 0
+            pnlPercent: trade.entryPrice > 0 ? (pnl / (trade.entryPrice * trade.lotSize)) * 100 : 0,
+            peakPrice: peakPrice || undefined
           });
 
           if (updatedTrade) {
             this.activeTrades.delete(tradeId);
           }
+
+          // Clean up peak price tracking
+          priceService.removeTradePeakPrice(tradeId);
 
           await logger.tradeClosed(updatedTrade || trade);
           return;
@@ -452,18 +475,24 @@ class TradeManager {
           // Fall through to default PnL=0
         }
 
-        // Fallback: Mark as CLOSED with PnL=0
+        // Fallback - still capture peak price
+        const peakPrice = priceService.getTradePeakPrice(tradeId);
+
         const updatedTrade = await updateTrade(tradeId, {
           status: 'CLOSED',
           closeTime: new Date().toISOString(),
           closePrice: trade.entryPrice,
           pnl: 0,
-          pnlPercent: 0
+          pnlPercent: 0,
+          peakPrice: peakPrice || undefined
         });
 
         if (updatedTrade) {
           this.activeTrades.delete(tradeId);
         }
+
+        // Clean up peak price tracking
+        priceService.removeTradePeakPrice(tradeId);
 
         await logger.tradeClosed(updatedTrade || trade);
         return;
@@ -505,6 +534,9 @@ class TradeManager {
       if (updatedTrade) {
         this.activeTrades.delete(tradeId);
       }
+
+      // Clean up peak price tracking
+      priceService.removeTradePeakPrice(tradeId);
 
       await logger.tradeClosed(updatedTrade || trade);
     } catch (error: any) {

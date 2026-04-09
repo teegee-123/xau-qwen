@@ -31,6 +31,7 @@ class PriceService {
   private heartbeatIntervalMs = 10000; // 10 seconds max between heartbeats
   private recentlyCheckedTrades = new Set<string>(); // Track trades already checked for SL/TP
   private trailingStates = new Map<string, TrailingState>(); // Track trailing SL state per trade
+  private tradePeakPrices = new Map<string, number>(); // Track ATH (peak bid) for ALL open trades, independent of trailing stop
 
   // Polling fallback
   private priceInterval: NodeJS.Timeout | null = null;
@@ -244,6 +245,9 @@ class PriceService {
         this.socketIO.emit('price_update', this.currentPrice);
       }
 
+      // Update peak prices for all open trades (ATH tracking, independent of trailing stop)
+      await this.updateAllTradePeaks();
+
       // Check for SL/TP violations
       await this.checkSLTPViolation();
 
@@ -253,11 +257,44 @@ class PriceService {
   }
 
   /**
-   * Get the peak price (All Time High) for a specific trade
+   * Get the peak price (All Time High) for a specific trade.
+   * This works for ALL trades, regardless of whether trailing stop is enabled.
    */
   getTradePeakPrice(tradeId: string): number | null {
-    const state = this.trailingStates.get(tradeId);
-    return state ? state.peakPrice : null;
+    return this.tradePeakPrices.get(tradeId) ?? null;
+  }
+
+  /**
+   * Remove peak price tracking for a trade (called when trade is closed)
+   */
+  removeTradePeakPrice(tradeId: string): void {
+    this.tradePeakPrices.delete(tradeId);
+    this.trailingStates.delete(tradeId);
+  }
+
+  /**
+   * Update peak price tracking for all open trades.
+   * This runs on every price tick and tracks the highest bid price seen for each trade.
+   * Works independently of trailing stop - ALL open trades get ATH tracking.
+   */
+  private async updateAllTradePeaks(): Promise<void> {
+    if (!this.currentPrice) return;
+
+    try {
+      const openTrades = await getOpenTrades();
+      const currentBid = this.currentPrice.bid;
+
+      for (const trade of openTrades) {
+        const existingPeak = this.tradePeakPrices.get(trade.id);
+        const newPeak = existingPeak !== undefined ? Math.max(existingPeak, currentBid) : Math.max(trade.entryPrice, currentBid);
+
+        if (newPeak !== existingPeak) {
+          this.tradePeakPrices.set(trade.id, newPeak);
+        }
+      }
+    } catch (error: any) {
+      console.error('[PriceService] Error updating trade peaks:', error.message);
+    }
   }
 
   /**
@@ -536,6 +573,9 @@ class PriceService {
       if (this.socketIO) {
         this.socketIO.emit('price_update', this.currentPrice);
       }
+
+      // Update peak prices for all open trades (ATH tracking, independent of trailing stop)
+      await this.updateAllTradePeaks();
 
       // Check for SL/TP violations
       await this.checkSLTPViolation();

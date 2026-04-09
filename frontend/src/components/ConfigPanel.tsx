@@ -88,6 +88,7 @@ const FetchMessages: React.FC<FetchMessagesProps> = ({ config }) => {
   };
 
   const stripIcons = (text: string) => {
+    if (!text || typeof text !== 'string') return '';
     return text
       .replace(/<[^>]+>/g, ' ')
       .replace(/[\u{1F600}-\u{1F64F}]/gu, ' ')
@@ -175,13 +176,13 @@ const FetchMessages: React.FC<FetchMessagesProps> = ({ config }) => {
               </div>
               <div>
                 <span className="text-trade-gray">Raw: </span>
-                <span className="text-white font-mono">{msg.text.substring(0, 150)}</span>
-                {msg.text.length > 150 && <span className="text-trade-gray">...</span>}
+                <span className="text-white font-mono">{(msg.text || '').substring(0, 150)}</span>
+                {(msg.text || '').length > 150 && <span className="text-trade-gray">...</span>}
               </div>
               <div>
                 <span className="text-trade-gray">Cleaned: </span>
-                <span className="text-trade-blue font-mono">{stripIcons(msg.text).substring(0, 150)}</span>
-                {stripIcons(msg.text).length > 150 && <span className="text-trade-gray">...</span>}
+                <span className="text-trade-blue font-mono">{stripIcons(msg.text || '').substring(0, 150)}</span>
+                {stripIcons(msg.text || '').length > 150 && <span className="text-trade-gray">...</span>}
               </div>
             </div>
           ))}

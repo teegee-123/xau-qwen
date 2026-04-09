@@ -21,7 +21,7 @@ describe('E2E Tests', () => {
   });
 
   describe('Full Flow: Message → Trade → Edit → Update → Close', () => {
-    it('should handle complete trade lifecycle', async async () => {
+    it('should handle complete trade lifecycle', async () => {
       // Setup mocks
       (jsonStore.getConfig as jest.Mock).mockResolvedValue({
         trading: { symbol: 'XAUUSD', lotSize: 0.01, closeTimeoutMinutes: 3, maxRetries: 3, retryDelayMs: 2000 }
@@ -94,7 +94,7 @@ TP
   });
 
   describe('Timeout Scenario: No edit → Auto-close after 3 min', () => {
-    it('should auto-close trade if no edit within timeout', async async () => {
+    it('should auto-close trade if no edit within timeout', async () => {
       (jsonStore.getConfig as jest.Mock).mockResolvedValue({
         trading: { symbol: 'XAUUSD', lotSize: 0.01, closeTimeoutMinutes: 3, maxRetries: 3, retryDelayMs: 2000 }
       });
@@ -150,7 +150,7 @@ TP
   });
 
   describe('Multi-Channel: Same rules applied across channels', () => {
-    it('should process messages from multiple channels with same rules', async async () => {
+    it('should process messages from multiple channels with same rules', async () => {
       const channels = ['channel-1', 'channel-2', 'channel-3'];
 
       for (const channelId of channels) {

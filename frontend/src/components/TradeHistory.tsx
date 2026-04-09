@@ -151,6 +151,7 @@ export const TradeHistory: React.FC<TradeHistoryProps> = ({ trades }) => {
                 <th className="text-left py-2 px-2">Type</th>
                 <th className="text-right py-2 px-2">Entry</th>
                 <th className="text-right py-2 px-2">Exit</th>
+                <th className="text-right py-2 px-2">Spot P&L</th>
                 <th className="text-right py-2 px-2">SL</th>
                 <th className="text-right py-2 px-2">TP</th>
                 <th className="text-right py-2 px-2">All Time High</th>
@@ -173,6 +174,13 @@ export const TradeHistory: React.FC<TradeHistoryProps> = ({ trades }) => {
                   <td className="py-2 px-2 text-trade-green">{trade.type}</td>
                   <td className="py-2 px-2 text-right">{formatPrice(trade.entryPrice)}</td>
                   <td className="py-2 px-2 text-right">{trade.closePrice ? formatPrice(trade.closePrice) : '-'}</td>
+                  <td className="py-2 px-2 text-right">
+                    {trade.closePrice && trade.entryPrice > 0 ? (
+                      <span className={trade.closePrice >= trade.entryPrice ? 'text-trade-green font-semibold' : 'text-trade-red font-semibold'}>
+                        {(((trade.closePrice - trade.entryPrice) / trade.entryPrice) * 100).toFixed(2)}%
+                      </span>
+                    ) : '-'}
+                  </td>
                   <td className="py-2 px-2 text-right text-trade-red">{trade.sl ? formatPrice(trade.sl) : '-'}</td>
                   <td className="py-2 px-2 text-right text-trade-green">{trade.tp ? formatPrice(trade.tp) : '-'}</td>
                   <td className="py-2 px-2 text-right text-trade-yellow font-mono">
