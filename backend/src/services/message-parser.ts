@@ -19,11 +19,12 @@ interface EditedSignal {
 
 class MessageParser {
   // Default regex patterns (can be overridden by config)
+  // [^\d]*? allows ANY non-digit characters (emojis, icons, spaces, newlines) between keyword and number
   private defaultInitialRegex = /Gold\s+buy\s+([\d.]+)/i;
   private defaultEditedRegex = /gold\s+buy\s+now/i;
   private defaultEntryRegex = /Buy\s*@\s*([\d.]+)\s*-\s*([\d.]+)/i;
-  private defaultSLRegex = /SL\s*[\n:\s]*([\d.]+)/i;  // * instead of + to handle "SL 4780" format
-  private defaultTPRegex = /TP\s*[\n:\s]*([\d.]+)/gi; // * instead of + to handle "TP 4820" format
+  private defaultSLRegex = /SL[^\d]*?([\d.]+)/i;  // Matches SL{any-icon}number
+  private defaultTPRegex = /TP[^\d]*?([\d.]+)/gi; // Matches TP{any-icon}number
 
   /**
    * Strip emojis, HTML tags, and Telegram custom emoji from text
@@ -99,13 +100,10 @@ class MessageParser {
   // Parse initial buy signal
   async parseInitialMessage(text: string): Promise<InitialSignal | null> {
     const pattern = await this.getInitialRegex();
-
-    // Strip emojis and HTML
-    const cleanedText = this.stripIcons(text);
-    console.log('[MessageParser] parseInitialMessage - Cleaned text:', cleanedText.substring(0, 100));
+    console.log('[MessageParser] parseInitialMessage - Text:', text.substring(0, 100));
     console.log('[MessageParser] parseInitialMessage - Pattern:', pattern.toString());
 
-    const match = cleanedText.match(pattern);
+    const match = text.match(pattern);
     console.log('[MessageParser] parseInitialMessage - Match result:', match ? match[0] : 'null');
 
     if (match) {
@@ -144,18 +142,14 @@ class MessageParser {
       // Log raw text as received
       console.log('[MessageParser] parseEditedMessage - Raw text:', JSON.stringify(text.substring(0, 200)));
 
-      // Strip emojis and HTML
-      const cleanedText = this.stripIcons(text);
-      console.log('[MessageParser] parseEditedMessage - Cleaned text:', JSON.stringify(cleanedText.substring(0, 200)));
-
-      // Check for "GOLD BUY NOW" header (case insensitive)
-      if (!this.defaultEditedRegex.test(cleanedText)) {
+      // Check for "GOLD BUY NOW" header (case insensitive, allows icons between words)
+      if (!this.defaultEditedRegex.test(text)) {
         console.log('[MessageParser] parseEditedMessage - No GOLD BUY NOW header found');
         return null;
       }
 
       // Extract entry range: "Buy @ 4685 - 4681"
-      const entryMatch = cleanedText.match(this.defaultEntryRegex);
+      const entryMatch = text.match(this.defaultEntryRegex);
       if (!entryMatch) {
         console.log('[MessageParser] parseEditedMessage - No entry range matched');
         return null;
@@ -168,8 +162,8 @@ class MessageParser {
         return null;
       }
 
-      // Extract SL - look for "SL" followed by number
-      const slMatch = cleanedText.match(this.defaultSLRegex);
+      // Extract SL - regex allows any non-digit chars between SL and number
+      const slMatch = text.match(this.defaultSLRegex);
       if (!slMatch) {
         console.log('[MessageParser] parseEditedMessage - No SL matched');
         return null;
@@ -180,8 +174,8 @@ class MessageParser {
         return null;
       }
 
-      // Extract all TP values and use the LOWEST
-      const tpMatches = cleanedText.matchAll(this.defaultTPRegex);
+      // Extract all TP values - regex allows any non-digit chars between TP and number
+      const tpMatches = text.matchAll(this.defaultTPRegex);
       const tpValues: number[] = [];
 
       for (const tpMatch of tpMatches) {

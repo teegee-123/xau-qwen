@@ -1,5 +1,6 @@
 import { addTrade, updateTrade, getOpenTrades, Trade, getTrades, saveTrades } from '../storage/json-store';
 import { oandaService } from './oanda.service';
+import { priceService } from './price.service';
 import { logger } from './logger.service';
 import { getConfig } from '../storage/json-store';
 
@@ -9,13 +10,13 @@ interface PendingTrade {
   price: number;
   timestamp: Date;
   tradeId?: string;
-  timeoutTimer?: NodeJS.Timeout;
   channelId?: string;
 }
 
 class TradeManager {
   private pendingTrades = new Map<string, PendingTrade>();
   private activeTrades = new Map<string, Trade>();
+  private ageCheckInterval: NodeJS.Timeout | null = null;
 
   /**
    * Restore trade state from persistent storage after server restart
@@ -50,20 +51,20 @@ class TradeManager {
         // Check if trade is missing oandaTradeId and try to recover it
         if (!trade.oandaTradeId && oandaTrades.length > 0) {
           console.log(`[TradeManager] Trade ${trade.id} missing oandaTradeId, attempting recovery...`);
-          
+
           // Try to match by instrument and approximate entry time/price
           const matchingOandaTrade = oandaTrades.find(oandaTrade => {
             const sameInstrument = oandaTrade.instrument === trade.symbol;
             const similarPrice = Math.abs(parseFloat(oandaTrade.price) - trade.entryPrice) < 5; // Within $5
             const similarTime = Math.abs(new Date(oandaTrade.createTime).getTime() - new Date(trade.openTime).getTime()) < 120000; // Within 2 minutes
-            
+
             return sameInstrument && (similarPrice || similarTime);
           });
 
           if (matchingOandaTrade) {
             console.log(`[TradeManager] Recovered oandaTradeId: ${matchingOandaTrade.id} for trade ${trade.id}`);
             trade.oandaTradeId = matchingOandaTrade.id;
-            
+
             // Update the trade in storage with the recovered oandaTradeId
             await updateTrade(trade.id, { oandaTradeId: matchingOandaTrade.id });
             await logger.log('message_received', `Recovered OANDA trade ID ${matchingOandaTrade.id} for trade ${trade.id}`);
@@ -74,46 +75,9 @@ class TradeManager {
 
         // Add to active trades map
         this.activeTrades.set(trade.id, trade);
-
-        // Check if trade has a pending edit
-        if (trade.pendingEdit && trade.telegramMessageId) {
-          const pending: PendingTrade = {
-            messageId: trade.telegramMessageId,
-            initialMessage: trade.matchedMessage.initial,
-            price: trade.entryPrice,
-            timestamp: new Date(trade.openTime),
-            tradeId: trade.id,
-            channelId: trade.channelId
-          };
-
-          this.pendingTrades.set(trade.telegramMessageId, pending);
-          await logger.log('message_received', `Restored pending edit for trade ${trade.id}`);
-        }
-
-        // Check if timeout has expired
-        if (trade.timeoutUntil) {
-          const timeoutTime = new Date(trade.timeoutUntil);
-          if (timeoutTime <= now) {
-            // Timeout already expired, close the trade
-            await logger.log('message_received', `Trade ${trade.id} timeout expired during downtime, closing`);
-            try {
-              await this.closeTradeManually(trade.id);
-            } catch (error: any) {
-              await logger.log('message_ignored', `Failed to close expired trade ${trade.id}: ${error.message}`);
-            }
-          } else {
-            // Timeout still active, set remaining time
-            const remainingMs = timeoutTime.getTime() - now.getTime();
-            const timeoutTimer = setTimeout(() => {
-              this.handleTimeout(trade.id, trade.telegramMessageId || '');
-            }, remainingMs);
-
-            await logger.log('message_received', `Trade ${trade.id} timeout restored (${Math.round(remainingMs / 1000)}s remaining)`);
-          }
-        }
       }
 
-      await logger.log('message_received', `Trade state restoration complete: ${this.activeTrades.size} active, ${this.pendingTrades.size} pending`);
+      await logger.log('message_received', `Trade state restoration complete: ${this.activeTrades.size} active`);
     } catch (error: any) {
       await logger.log('message_ignored', `Failed to restore trade state: ${error.message}`);
     }
@@ -148,11 +112,12 @@ class TradeManager {
         instrument: tradeResult.instrument
       });
 
-      // Create trade record with persistence fields
-      const timeoutMs = config.trading.closeTimeoutMinutes * 60 * 1000;
-      const timeoutUntil = new Date(Date.now() + timeoutMs);
+      // Check if trailing SL is enabled
+      const trailingDistance = config.trading.trailingStopDistance || 0;
+      const useTrailingSL = trailingDistance > 0;
 
-      const tradeData = {
+      // Create trade record
+      const tradeData: any = {
         type: 'BUY' as const,
         symbol: config.trading.symbol,
         entryPrice: parseFloat(tradeResult.price),
@@ -165,9 +130,17 @@ class TradeManager {
         retries: 0,
         channelId,
         telegramMessageId: messageId,
-        timeoutUntil: timeoutUntil.toISOString(),
-        oandaTradeId: tradeResult.tradeId // Store OANDA trade ID
+        oandaTradeId: tradeResult.tradeId,
+        trailingStopDistance: trailingDistance // Store for price service to use
       };
+
+      // If trailing SL is enabled, set initial SL and no TP
+      if (useTrailingSL) {
+        const initialSL = tradeData.entryPrice - trailingDistance;
+        tradeData.sl = initialSL;
+        tradeData.tp = undefined; // No TP when trailing
+        console.log(`[TradeManager] Trailing SL enabled: Initial SL=${initialSL}, Distance=${trailingDistance}`);
+      }
 
       console.log('[TradeManager] Trade data to save:', {
         hasOandaTradeId: !!tradeData.oandaTradeId,
@@ -185,11 +158,6 @@ class TradeManager {
 
       pending.tradeId = trade.id;
       this.activeTrades.set(trade.id, trade);
-
-      // Set timeout timer (default 3 minutes)
-      pending.timeoutTimer = setTimeout(() => {
-        this.handleTimeout(trade.id, messageId);
-      }, timeoutMs);
 
       await logger.tradeOpened(trade);
     } catch (error: any) {
@@ -220,6 +188,33 @@ class TradeManager {
     }
 
     try {
+      // Check if trailing SL is enabled in config
+      const config = await getConfig();
+      const trailingDistance = config.trading.trailingStopDistance || 0;
+
+      if (trailingDistance > 0) {
+        // Trailing SL is active - ignore SL/TP from edited message
+        console.log(`[TradeManager] handleEditedSignal - Trailing SL active (distance=${trailingDistance}), ignoring message SL/TP`);
+        await logger.log('message_received', `Edited message received but trailing SL is active. Ignoring SL=${sl}, TP=${tp}`);
+        
+        // Just update the trade record to note the edited message was received
+        const updatedTrade = await updateTrade(pending.tradeId, {
+          matchedMessage: {
+            ...trade.matchedMessage,
+            edited: message
+          }
+        });
+
+        if (updatedTrade) {
+          this.activeTrades.set(pending.tradeId, updatedTrade);
+        }
+
+        console.log('[TradeManager] handleEditedSignal - Trailing SL will manage SL automatically');
+        await logger.tradeUpdated(updatedTrade || trade);
+        return;
+      }
+
+      // Trailing SL not active - proceed with normal SL/TP update
       // Always fetch from OANDA first - OANDA is the source of truth
       console.log('[TradeManager] handleEditedSignal - Fetching open trades from OANDA...');
       const oandaTrades = await oandaService.getOpenTrades();
@@ -251,11 +246,10 @@ class TradeManager {
 
       await oandaService.updateSLTP(oandaTradeId, String(sl), String(tp));
 
-      // Update trade record and clear timeout
+      // Update trade record with SL/TP
       const updatedTrade = await updateTrade(pending.tradeId, {
         sl,
         tp,
-        timeoutUntil: undefined, // Clear timeout since SL/TP are set
         pendingEdit: undefined, // Clear pending edit
         matchedMessage: {
           ...trade.matchedMessage,
@@ -265,12 +259,6 @@ class TradeManager {
 
       if (updatedTrade) {
         this.activeTrades.set(pending.tradeId, updatedTrade);
-      }
-
-      // Clear timeout timer
-      if (pending.timeoutTimer) {
-        clearTimeout(pending.timeoutTimer);
-        pending.timeoutTimer = undefined;
       }
 
       console.log('[TradeManager] handleEditedSignal - SL/TP updated successfully');
@@ -370,12 +358,15 @@ class TradeManager {
       // If OANDA didn't return PnL, calculate it manually
       let pnl = parseFloat(result.pnl);
       const closePrice = parseFloat(result.closePrice);
-      
+
       if (pnl === 0 && closePrice > 0) {
         const priceDiff = closePrice - trade.entryPrice;
         pnl = priceDiff * trade.lotSize * 100;
         console.log(`[TradeManager] handleTimeout - OANDA returned PnL=0, calculated manually: ${pnl}`);
       }
+
+      // Capture peak price before cleanup
+      const peakPrice = priceService.getTradePeakPrice(tradeId);
 
       // Update trade record
       const updatedTrade = await updateTrade(tradeId, {
@@ -383,7 +374,8 @@ class TradeManager {
         closeTime: new Date().toISOString(),
         closePrice: closePrice,
         pnl: pnl,
-        pnlPercent: trade.entryPrice > 0 ? (pnl / (trade.entryPrice * trade.lotSize)) * 100 : 0
+        pnlPercent: trade.entryPrice > 0 ? (pnl / (trade.entryPrice * trade.lotSize)) * 100 : 0,
+        peakPrice: peakPrice || undefined
       });
 
       if (updatedTrade) {
@@ -498,12 +490,16 @@ class TradeManager {
         console.log(`[TradeManager] OANDA returned PnL=0, calculated manually: ${pnl}`);
       }
 
+      // Capture peak price before cleanup
+      const peakPrice = priceService.getTradePeakPrice(tradeId);
+
       const updatedTrade = await updateTrade(tradeId, {
         status: 'CLOSED',
         closeTime: new Date().toISOString(),
         closePrice: closePrice,
         pnl: pnl,
-        pnlPercent: trade.entryPrice > 0 ? (pnl / (trade.entryPrice * trade.lotSize)) * 100 : 0
+        pnlPercent: trade.entryPrice > 0 ? (pnl / (trade.entryPrice * trade.lotSize)) * 100 : 0,
+        peakPrice: peakPrice || undefined
       });
 
       if (updatedTrade) {
@@ -522,13 +518,61 @@ class TradeManager {
     return await getOpenTrades();
   }
 
-  async cleanup(): Promise<void> {
-    // Clear all timeout timers
-    for (const [id, pending] of this.pendingTrades.entries()) {
-      if (pending.timeoutTimer) {
-        clearTimeout(pending.timeoutTimer);
+  /**
+   * Start periodic trade age checker
+   * Closes trades that are older than closeTimeoutMinutes and have no SL/TP set
+   */
+  startPeriodicAgeChecker(): void {
+    if (this.ageCheckInterval) return; // Already running
+
+    console.log('[TradeManager] Starting periodic trade age checker (every 60s)');
+    
+    this.ageCheckInterval = setInterval(async () => {
+      await this.checkTradeAges();
+    }, 60000); // Check every 60 seconds
+  }
+
+  /**
+   * Check all open trades and close those that exceed the timeout without SL/TP
+   */
+  private async checkTradeAges(): Promise<void> {
+    try {
+      const config = await getConfig();
+      const timeoutMs = config.trading.closeTimeoutMinutes * 60 * 1000;
+      const openTrades = await getOpenTrades();
+      const now = new Date();
+
+      for (const trade of openTrades) {
+        // Skip trades that already have SL/TP set
+        if (trade.sl || trade.tp) continue;
+
+        const tradeAge = now.getTime() - new Date(trade.openTime).getTime();
+        
+        if (tradeAge > timeoutMs) {
+          console.log(`[TradeManager] Trade ${trade.id} age (${Math.round(tradeAge / 1000)}s) exceeds timeout (${config.trading.closeTimeoutMinutes}m), closing...`);
+          await logger.log('message_received', `Trade ${trade.id} timed out without SL/TP, closing`);
+          await this.closeTradeManually(trade.id);
+        }
       }
+    } catch (error: any) {
+      console.error('[TradeManager] Error checking trade ages:', error.message);
     }
+  }
+
+  /**
+   * Stop periodic trade age checker
+   */
+  stopPeriodicAgeChecker(): void {
+    if (this.ageCheckInterval) {
+      clearInterval(this.ageCheckInterval);
+      this.ageCheckInterval = null;
+      console.log('[TradeManager] Stopped periodic trade age checker');
+    }
+  }
+
+  async cleanup(): Promise<void> {
+    // Stop periodic age checker
+    this.stopPeriodicAgeChecker();
     this.pendingTrades.clear();
     this.activeTrades.clear();
   }

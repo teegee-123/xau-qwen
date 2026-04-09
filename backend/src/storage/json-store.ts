@@ -87,6 +87,10 @@ export interface Trade {
   pendingEdit?: string; // Store pending edited message content
   // OANDA integration
   oandaTradeId?: string; // OANDA trade ID for API operations
+  // Trailing stop loss
+  trailingStopDistance?: number; // Distance in points for trailing SL (0 = disabled)
+  // Price tracking
+  peakPrice?: number; // Highest price reached during trade life (All Time High)
 }
 
 export async function getTrades(): Promise<Trade[]> {
@@ -185,6 +189,7 @@ export interface Config {
     closeTimeoutMinutes: number;
     maxRetries: number;
     retryDelayMs: number;
+    trailingStopDistance: number; // 0 = disabled, >0 = trailing SL active
   };
   messages: {
     initialPattern: string;
@@ -214,7 +219,8 @@ const DEFAULT_CONFIG: Config = {
     symbol: 'XAU_USD',
     closeTimeoutMinutes: 3,
     maxRetries: 3,
-    retryDelayMs: 2000
+    retryDelayMs: 2000,
+    trailingStopDistance: 0 // Disabled by default
   },
   messages: {
     initialPattern: '',
@@ -257,6 +263,9 @@ export async function getConfig(): Promise<Config> {
     }
     if (process.env.TRADING_CLOSE_TIMEOUT_MINUTES) {
       config.trading.closeTimeoutMinutes = parseInt(process.env.TRADING_CLOSE_TIMEOUT_MINUTES);
+    }
+    if (process.env.TRAILING_STOP_DISTANCE) {
+      config.trading.trailingStopDistance = parseFloat(process.env.TRAILING_STOP_DISTANCE) || 0;
     }
     if (process.env.TELEGRAM_CHANNELS) {
       config.telegram.channels = process.env.TELEGRAM_CHANNELS.split(',').map(c => c.trim()).filter(c => c);

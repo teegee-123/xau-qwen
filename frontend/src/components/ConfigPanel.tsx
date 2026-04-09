@@ -32,6 +32,7 @@ interface Config {
     closeTimeoutMinutes: number;
     maxRetries: number;
     retryDelayMs: number;
+    trailingStopDistance?: number;
   };
   messages: {
     initialPattern: string;
@@ -996,6 +997,20 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ onSave }) => {
               onChange={(e) => updateTrading('closeTimeoutMinutes', parseInt(e.target.value))}
               className="w-full bg-trade-card border border-trade-gray rounded px-3 py-2 text-sm"
             />
+          </div>
+          <div>
+            <label className="block text-xs text-trade-gray mb-1">Trailing Stop Loss Distance (points)</label>
+            <input
+              type="number"
+              step="0.01"
+              value={config.trading.trailingStopDistance || ''}
+              onChange={(e) => updateTrading('trailingStopDistance', parseFloat(e.target.value) || 0)}
+              placeholder="0 = disabled"
+              className="w-full bg-trade-card border border-trade-gray rounded px-3 py-2 text-sm"
+            />
+            <p className="text-xs text-trade-gray mt-1">
+              When set, SL trails behind the highest price by this distance. TP is disabled.
+            </p>
           </div>
           <div>
             <label className="block text-xs text-trade-gray mb-1">Max Retries</label>

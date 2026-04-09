@@ -46,8 +46,11 @@ class TelegramListenerWorker {
 
       console.log('[Listener] Telegram client is connected and ready to start listener.');
 
-      // Register message handler
+      // Register message handler (only if not already registered)
       console.log('[Listener] Registering onMessage callback with telegramService...');
+      
+      // Check if we already have a handler registered to prevent duplicates
+      // This is a safety check in case stopListening() wasn't called properly
       telegramService.onMessage(async (event: any) => {
         console.log('[Listener] onMessage callback TRIGGERED!');
         console.log('[Listener] Event keys:', Object.keys(event || {}));

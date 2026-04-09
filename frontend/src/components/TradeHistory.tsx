@@ -18,6 +18,7 @@ interface Trade {
     initial: string;
     edited?: string;
   };
+  peakPrice?: number; // All Time High
 }
 
 interface TradeHistoryProps {
@@ -150,6 +151,9 @@ export const TradeHistory: React.FC<TradeHistoryProps> = ({ trades }) => {
                 <th className="text-left py-2 px-2">Type</th>
                 <th className="text-right py-2 px-2">Entry</th>
                 <th className="text-right py-2 px-2">Exit</th>
+                <th className="text-right py-2 px-2">SL</th>
+                <th className="text-right py-2 px-2">TP</th>
+                <th className="text-right py-2 px-2">All Time High</th>
                 <th className="text-right py-2 px-2">PnL $</th>
                 <th className="text-right py-2 px-2">PnL %</th>
                 <th className="text-left py-2 px-2">Messages</th>
@@ -169,6 +173,11 @@ export const TradeHistory: React.FC<TradeHistoryProps> = ({ trades }) => {
                   <td className="py-2 px-2 text-trade-green">{trade.type}</td>
                   <td className="py-2 px-2 text-right">{formatPrice(trade.entryPrice)}</td>
                   <td className="py-2 px-2 text-right">{trade.closePrice ? formatPrice(trade.closePrice) : '-'}</td>
+                  <td className="py-2 px-2 text-right text-trade-red">{trade.sl ? formatPrice(trade.sl) : '-'}</td>
+                  <td className="py-2 px-2 text-right text-trade-green">{trade.tp ? formatPrice(trade.tp) : '-'}</td>
+                  <td className="py-2 px-2 text-right text-trade-yellow font-mono">
+                    {trade.peakPrice ? formatPrice(trade.peakPrice) : '-'}
+                  </td>
                   <td className="py-2 px-2 text-right">
                     {trade.pnl !== undefined ? (
                       <span className={trade.pnl >= 0 ? 'text-trade-green font-semibold' : 'text-trade-red font-semibold'}>

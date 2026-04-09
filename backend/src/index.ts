@@ -197,6 +197,14 @@ async function bootstrap() {
     console.warn('[Bootstrap] Trade state restore failed:', error.message);
   }
 
+  // Start periodic trade age checker (closes old trades without SL/TP)
+  try {
+    tradeManager.startPeriodicAgeChecker();
+    console.log('[Bootstrap] Trade age checker started');
+  } catch (error: any) {
+    console.warn('[Bootstrap] Trade age checker start failed:', error.message);
+  }
+
   // Auto-start listener if configured
   try {
     const config = await getConfig();

@@ -11,6 +11,13 @@ interface PriceData {
   timestamp: string;
 }
 
+interface TrailingState {
+  tradeId: string;
+  peakPrice: number;
+  currentSL: number;
+  distance: number;
+}
+
 class PriceService {
   private currentPrice: PriceData | null = null;
   private socketIO: any = null;
@@ -23,6 +30,7 @@ class PriceService {
   private heartbeatTimeout: NodeJS.Timeout | null = null;
   private heartbeatIntervalMs = 10000; // 10 seconds max between heartbeats
   private recentlyCheckedTrades = new Set<string>(); // Track trades already checked for SL/TP
+  private trailingStates = new Map<string, TrailingState>(); // Track trailing SL state per trade
 
   // Polling fallback
   private priceInterval: NodeJS.Timeout | null = null;
@@ -238,6 +246,81 @@ class PriceService {
 
       // Check for SL/TP violations
       await this.checkSLTPViolation();
+
+      // Check for trailing SL updates
+      await this.checkTrailingSL();
+    }
+  }
+
+  /**
+   * Get the peak price (All Time High) for a specific trade
+   */
+  getTradePeakPrice(tradeId: string): number | null {
+    const state = this.trailingStates.get(tradeId);
+    return state ? state.peakPrice : null;
+  }
+
+  /**
+   * Check and update trailing SL for all open trades
+   */
+  private async checkTrailingSL(): Promise<void> {
+    if (!this.currentPrice) return;
+
+    try {
+      const openTrades = await getOpenTrades();
+      const trailingTrades = openTrades.filter(t => t.trailingStopDistance && t.trailingStopDistance > 0 && t.symbol === this.currentPrice?.symbol);
+
+      for (const trade of trailingTrades) {
+        const distance = trade.trailingStopDistance;
+        if (!distance || distance <= 0) continue; // TypeScript guard
+        
+        const currentBid = this.currentPrice!.bid;
+
+        // Get or create trailing state for this trade
+        let state = this.trailingStates.get(trade.id);
+        if (!state) {
+          state = {
+            tradeId: trade.id,
+            peakPrice: Math.max(trade.entryPrice, currentBid),
+            currentSL: trade.sl || (trade.entryPrice - distance),
+            distance: distance
+          };
+          this.trailingStates.set(trade.id, state);
+        }
+
+        // Ensure state is defined before using it
+        if (!state) continue;
+
+        // Update peak price if current bid is higher
+        if (currentBid > state.peakPrice) {
+          state.peakPrice = currentBid;
+        }
+
+        // Calculate new SL based on peak
+        const newSL = state.peakPrice - state.distance;
+
+        // Only update if new SL is higher than current SL (trailing only moves up)
+        if (newSL > state.currentSL) {
+          console.log(`[PriceService] Trailing SL update for trade ${trade.id}: ${state.currentSL.toFixed(2)} -> ${newSL.toFixed(2)} (peak: ${state.peakPrice.toFixed(2)})`);
+          await logger.log('message_received', `Trailing SL updated for trade ${trade.id}: ${state.currentSL.toFixed(2)} -> ${newSL.toFixed(2)}`);
+
+          // Update on OANDA
+          try {
+            const oandaTradeId = trade.oandaTradeId;
+            if (oandaTradeId) {
+              await oandaService.updateSLTP(oandaTradeId, String(newSL), undefined);
+            }
+          } catch (oandaError: any) {
+            console.error(`[PriceService] Failed to update trailing SL on OANDA:`, oandaError.message);
+          }
+
+          // Update local state and storage
+          state.currentSL = newSL;
+          await updateTrade(trade.id, { sl: newSL });
+        }
+      }
+    } catch (error: any) {
+      console.error('[PriceService] Error checking trailing SL:', error.message);
     }
   }
 

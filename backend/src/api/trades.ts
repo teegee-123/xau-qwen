@@ -1,15 +1,28 @@
 import { Router } from 'express';
 import { getTrades, getOpenTrades, getClosedTrades, updateTrade } from '../storage/json-store';
 import { tradeManager } from '../services/trade-manager';
+import { priceService } from '../services/price.service';
 import { logger } from '../services/logger.service';
 
 const router = Router();
+
+// Helper to merge in-memory peak price into trade objects
+const attachPeakPrice = (trades: any[]) => {
+    return trades.map(trade => {
+        // If peak not in DB, check memory
+        if (!trade.peakPrice) {
+            const peak = priceService.getTradePeakPrice(trade.id);
+            if (peak) trade.peakPrice = peak;
+        }
+        return trade;
+    });
+};
 
 // Get all trades
 router.get('/', async (req, res) => {
   try {
     const trades = await getTrades();
-    res.json(trades);
+    res.json(attachPeakPrice(trades));
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -19,7 +32,7 @@ router.get('/', async (req, res) => {
 router.get('/open', async (req, res) => {
   try {
     const trades = await tradeManager.getActiveTrades();
-    res.json(trades);
+    res.json(attachPeakPrice(trades));
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -29,7 +42,7 @@ router.get('/open', async (req, res) => {
 router.get('/closed', async (req, res) => {
   try {
     const trades = await getClosedTrades();
-    res.json(trades);
+    res.json(attachPeakPrice(trades));
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }

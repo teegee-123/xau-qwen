@@ -577,6 +577,14 @@ class TelegramService {
 
   onMessage(handler: (event: any) => void): void {
     console.log('[Telegram] onMessage called - adding handler. Total handlers before:', this.messageHandlers.length);
+    
+    // Check if this exact handler is already registered (prevent duplicates)
+    const isDuplicate = this.messageHandlers.some(h => h === handler);
+    if (isDuplicate) {
+      console.log('[Telegram] Handler already registered, skipping duplicate');
+      return;
+    }
+    
     this.messageHandlers.push(handler);
     console.log('[Telegram] onMessage complete. Total handlers after:', this.messageHandlers.length);
   }
@@ -671,6 +679,10 @@ class TelegramService {
         }
         console.log('[Telegram] Event handlers removed');
       }
+
+      // Clear message handlers to prevent stacking on restart
+      console.log(`[Telegram] Clearing ${this.messageHandlers.length} message handlers`);
+      this.messageHandlers = [];
 
       this.pollingChannels = [];
       this.channelEntities.clear();

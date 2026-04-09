@@ -18,6 +18,7 @@ interface Trade {
   oandaTradeId?: string;
   channelId?: string;
   telegramMessageId?: string;
+  peakPrice?: number;
 }
 
 interface PriceUpdate {
@@ -187,6 +188,7 @@ export const OpenTrades: React.FC<OpenTradesProps> = ({ trades, onTradeClosed })
                 <th className="text-right py-2 px-2">TP</th>
                 <th className="text-right py-2 px-2">Lots</th>
                 <th className="text-right py-2 px-2">Current</th>
+                <th className="text-right py-2 px-2">All Time High</th>
                 <th className="text-right py-2 px-2">PnL $</th>
                 <th className="text-right py-2 px-2">PnL %</th>
                 <th className="text-left py-2 px-2">OANDA ID</th>
@@ -225,6 +227,9 @@ export const OpenTrades: React.FC<OpenTradesProps> = ({ trades, onTradeClosed })
                           </span>
                         </span>
                       ) : '-'}
+                    </td>
+                    <td className="py-2 px-2 text-right text-trade-yellow font-mono">
+                      {trade.peakPrice ? formatPrice(trade.peakPrice) : '-'}
                     </td>
                     <td className="py-2 px-2 text-right">
                       {realtimePnL !== null ? formatPnL(realtimePnL) : (trade.pnl !== undefined ? formatPnL(trade.pnl) : '-')}
