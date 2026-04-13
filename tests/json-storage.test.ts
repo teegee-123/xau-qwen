@@ -14,9 +14,9 @@ describe('JSON Storage', () => {
     fs.writeFileSync(TEST_TRADES_FILE, '[]');
     fs.writeFileSync(TEST_LOGS_FILE, '[]');
     fs.writeFileSync(TEST_CONFIG_FILE, JSON.stringify({
-      telegram: { phoneNumber: '', apiId: '', apiHash: '', channels: [], isAuthenticated: false },
+      telegram: { phoneNumber: '', apiId: '', apiHash: '', channels: [], isAuthenticated: false, authState: 'disconnected' },
       oanda: { accountId: '', token: '', environment: 'practice' },
-      trading: { lotSize: 0.01, symbol: 'XAUUSD', closeTimeoutMinutes: 3, maxRetries: 3, retryDelayMs: 2000 },
+      trading: { lotSize: 0.01, symbol: 'XAUUSD', closeTimeoutMinutes: 3, maxRetries: 3, retryDelayMs: 2000, trailingStopDistance: 0, listenToReplies: false },
       messages: { initialPattern: 'Gold buy', editedPattern: 'GOLD BUY NOW' },
       listener: { isActive: false }
     }));

@@ -144,7 +144,7 @@ class TelegramListenerWorker {
 
       // Check if listenToReplies is enabled
       const config = await getConfig();
-      if (!config.trading.listenToReplies) {
+      if (!config.trading?.listenToReplies) {
         console.log('[Listener] handleReplyMessage - listenToReplies is OFF, ignoring');
         return;
       }

@@ -1,4 +1,4 @@
-import { addTrade, updateTrade, getOpenTrades, Trade, getTrades, saveTrades } from '../storage/json-store';
+import { addTrade, updateTrade, getOpenTrades, Trade, getTrades, saveTrades, getStrategyById, getStrategies, Strategy } from '../storage/json-store';
 import { oandaService } from './oanda.service';
 import { priceService } from './price.service';
 import { logger } from './logger.service';
@@ -6,6 +6,7 @@ import { getConfig } from '../storage/json-store';
 
 interface PendingTrade {
   messageId: string;
+  strategyId: string;
   initialMessage: string;
   price: number;
   timestamp: Date;
@@ -14,16 +15,37 @@ interface PendingTrade {
 }
 
 class TradeManager {
-  private pendingTrades = new Map<string, PendingTrade>();
-  private activeTrades = new Map<string, Trade>();
+  // Per-strategy tracking: strategyId -> messageId -> pending
+  private pendingTrades = new Map<string, Map<string, PendingTrade>>();
+  // Per-strategy tracking: strategyId -> tradeId -> trade
+  private activeTrades = new Map<string, Map<string, Trade>>();
   private ageCheckInterval: NodeJS.Timeout | null = null;
+
+  /**
+   * Get or create pending trades map for a strategy
+   */
+  private getPendingMap(strategyId: string): Map<string, PendingTrade> {
+    if (!this.pendingTrades.has(strategyId)) {
+      this.pendingTrades.set(strategyId, new Map());
+    }
+    return this.pendingTrades.get(strategyId)!;
+  }
+
+  /**
+   * Get or create active trades map for a strategy
+   */
+  private getActiveMap(strategyId: string): Map<string, Trade> {
+    if (!this.activeTrades.has(strategyId)) {
+      this.activeTrades.set(strategyId, new Map());
+    }
+    return this.activeTrades.get(strategyId)!;
+  }
 
   /**
    * Restore trade state from persistent storage after server restart
    */
   async restoreState(): Promise<void> {
     try {
-      const config = await getConfig();
       const openTrades = await getTrades();
 
       // Filter to only OPEN trades
@@ -36,7 +58,7 @@ class TradeManager {
 
       await logger.log('message_received', `Restoring ${stillOpenTrades.length} open trades from storage`);
 
-      // Fetch open trades from OANDA to recover missing oandaTradeId values
+      // Fetch open trades from OANDA to recover missing oandaTradeId values (LIVE trades only)
       let oandaTrades: any[] = [];
       try {
         oandaTrades = await oandaService.getOpenTrades();
@@ -45,160 +67,251 @@ class TradeManager {
         console.warn('[TradeManager] Failed to fetch OANDA trades for recovery:', error.message);
       }
 
-      const now = new Date();
-
       for (const trade of stillOpenTrades) {
-        // Check if trade is missing oandaTradeId and try to recover it
-        if (!trade.oandaTradeId && oandaTrades.length > 0) {
+        // Group by strategy
+        const strategyId = trade.strategyId;
+        const activeMap = this.getActiveMap(strategyId);
+        activeMap.set(trade.id, trade);
+
+        // For LIVE trades, try to recover oandaTradeId if missing
+        if (trade.mode === 'LIVE' && !trade.oandaTradeId && oandaTrades.length > 0) {
           console.log(`[TradeManager] Trade ${trade.id} missing oandaTradeId, attempting recovery...`);
 
-          // Try to match by instrument and approximate entry time/price
           const matchingOandaTrade = oandaTrades.find(oandaTrade => {
             const sameInstrument = oandaTrade.instrument === trade.symbol;
-            const similarPrice = Math.abs(parseFloat(oandaTrade.price) - trade.entryPrice) < 5; // Within $5
-            const similarTime = Math.abs(new Date(oandaTrade.createTime).getTime() - new Date(trade.openTime).getTime()) < 120000; // Within 2 minutes
-
+            const similarPrice = Math.abs(parseFloat(oandaTrade.price) - trade.entryPrice) < 5;
+            const similarTime = Math.abs(new Date(oandaTrade.createTime).getTime() - new Date(trade.openTime).getTime()) < 120000;
             return sameInstrument && (similarPrice || similarTime);
           });
 
           if (matchingOandaTrade) {
             console.log(`[TradeManager] Recovered oandaTradeId: ${matchingOandaTrade.id} for trade ${trade.id}`);
             trade.oandaTradeId = matchingOandaTrade.id;
-
-            // Update the trade in storage with the recovered oandaTradeId
             await updateTrade(trade.id, { oandaTradeId: matchingOandaTrade.id });
-            await logger.log('message_received', `Recovered OANDA trade ID ${matchingOandaTrade.id} for trade ${trade.id}`);
           } else {
             console.warn(`[TradeManager] Could not recover oandaTradeId for trade ${trade.id}`);
           }
         }
-
-        // Add to active trades map
-        this.activeTrades.set(trade.id, trade);
       }
 
-      await logger.log('message_received', `Trade state restoration complete: ${this.activeTrades.size} active`);
+      // Count total active trades across all strategies
+      let totalActive = 0;
+      this.activeTrades.forEach(map => totalActive += map.size);
+
+      await logger.log('message_received', `Trade state restoration complete: ${totalActive} active across ${this.activeTrades.size} strategies`);
     } catch (error: any) {
       await logger.log('message_ignored', `Failed to restore trade state: ${error.message}`);
     }
   }
 
+  /**
+   * Handle initial buy signal - creates trades for ALL strategies that subscribe to the channel
+   */
   async handleInitialSignal(messageId: string, message: string, price: number, channelId?: string): Promise<void> {
+    try {
+      const strategies = await getStrategies();
+
+      // Filter strategies that subscribe to this channel
+      const matchingStrategies = strategies.filter(s =>
+        !channelId || s.channels.includes(channelId)
+      );
+
+      if (matchingStrategies.length === 0) {
+        console.log('[TradeManager] No strategies subscribe to this channel, ignoring signal');
+        return;
+      }
+
+      console.log(`[TradeManager] Signal received, dispatching to ${matchingStrategies.length} strategies`);
+
+      for (const strategy of matchingStrategies) {
+        await this.handleSignalForStrategy(messageId, message, price, strategy, channelId);
+      }
+    } catch (error: any) {
+      await logger.log('message_ignored', `Error handling initial signal: ${error.message}`);
+      console.error(`[TradeManager] Error in handleInitialSignal: ${error.message}`);
+    }
+  }
+
+  /**
+   * Handle signal for a single strategy (LIVE or PAPER)
+   */
+  private async handleSignalForStrategy(
+    messageId: string,
+    message: string,
+    price: number,
+    strategy: Strategy,
+    channelId?: string
+  ): Promise<void> {
     const config = await getConfig();
+    const pendingMap = this.getPendingMap(strategy.id);
 
     // Create pending trade
     const pending: PendingTrade = {
       messageId,
+      strategyId: strategy.id,
       initialMessage: message,
       price,
-      timestamp: new Date()
+      timestamp: new Date(),
+      channelId
     };
 
-    this.pendingTrades.set(messageId, pending);
+    pendingMap.set(messageId, pending);
 
-    // Place market buy order immediately
+    const isLive = strategy.isActive;
+    const mode = isLive ? 'LIVE' : 'PAPER';
+
+    console.log(`[TradeManager] ${mode} trade for strategy "${strategy.name}" (${strategy.id})`);
+
     try {
-      const tradeResult = await oandaService.placeMarketOrder({
-        instrument: config.trading.symbol,
-        units: config.trading.lotSize * 1000, // OANDA uses units (1000 units = 0.01 lot for most pairs)
-        timeInForce: 'FOK',
-        positionFill: 'DEFAULT'
-      });
+      let entryPrice: number;
+      let oandaTradeId: string | undefined;
 
-      console.log('[TradeManager] OANDA trade result:', {
-        tradeId: tradeResult.tradeId,
-        tradeIdType: typeof tradeResult.tradeId,
-        price: tradeResult.price,
-        instrument: tradeResult.instrument
-      });
+      if (isLive) {
+        // LIVE: Place real market order on OANDA
+        const tradeResult = await oandaService.placeMarketOrder({
+          instrument: strategy.trading.symbol,
+          units: strategy.trading.lotSize * 1000,
+          timeInForce: 'FOK',
+          positionFill: 'DEFAULT'
+        });
+
+        entryPrice = parseFloat(tradeResult.price);
+        oandaTradeId = tradeResult.tradeId;
+
+        console.log('[TradeManager] OANDA trade result:', {
+          tradeId: tradeResult.tradeId,
+          price: tradeResult.price
+        });
+      } else {
+        // PAPER: Get current price from price service (no OANDA call)
+        const currentPrice = await oandaService.getCurrentPrice(strategy.trading.symbol);
+        if (!currentPrice) {
+          console.warn('[TradeManager] No current price available for paper trade, using signal price');
+          entryPrice = price;
+        } else {
+          entryPrice = parseFloat(currentPrice.bid);
+        }
+        oandaTradeId = undefined;
+      }
 
       // Check if trailing SL is enabled
-      const trailingDistance = config.trading.trailingStopDistance || 0;
+      const trailingDistance = strategy.trading.trailingStopDistance || 0;
       const useTrailingSL = trailingDistance > 0;
 
       // Create trade record
       const tradeData: any = {
         type: 'BUY' as const,
-        symbol: config.trading.symbol,
-        entryPrice: parseFloat(tradeResult.price),
-        lotSize: config.trading.lotSize,
+        symbol: strategy.trading.symbol,
+        entryPrice,
+        lotSize: strategy.trading.lotSize,
         openTime: new Date().toISOString(),
         status: 'OPEN' as const,
+        mode: mode as 'LIVE' | 'PAPER',
+        strategyId: strategy.id,
         matchedMessage: {
           initial: message
         },
         retries: 0,
         channelId,
         telegramMessageId: messageId,
-        oandaTradeId: tradeResult.tradeId,
-        trailingStopDistance: trailingDistance // Store for price service to use
+        oandaTradeId,
+        trailingStopDistance: trailingDistance
       };
 
       // If trailing SL is enabled, set initial SL and no TP
       if (useTrailingSL) {
-        const initialSL = tradeData.entryPrice - trailingDistance;
+        const initialSL = entryPrice - trailingDistance;
         tradeData.sl = initialSL;
-        tradeData.tp = undefined; // No TP when trailing
+        tradeData.tp = undefined;
         console.log(`[TradeManager] Trailing SL enabled: Initial SL=${initialSL}, Distance=${trailingDistance}`);
       }
 
-      console.log('[TradeManager] Trade data to save:', {
-        hasOandaTradeId: !!tradeData.oandaTradeId,
-        oandaTradeId: tradeData.oandaTradeId,
-        oandaTradeIdType: typeof tradeData.oandaTradeId
-      });
-
       const trade = await addTrade(tradeData);
 
-      console.log('[TradeManager] Trade saved to storage:', {
-        id: trade.id,
-        hasOandaTradeId: !!trade.oandaTradeId,
-        oandaTradeId: trade.oandaTradeId
-      });
+      // Add to active trades map
+      const activeMap = this.getActiveMap(strategy.id);
+      activeMap.set(trade.id, trade);
 
       pending.tradeId = trade.id;
-      this.activeTrades.set(trade.id, trade);
 
       await logger.tradeOpened(trade);
+      console.log(`[TradeManager] ${mode} trade opened for "${strategy.name}": ${trade.id} @ ${entryPrice}`);
     } catch (error: any) {
-      await logger.log('message_ignored', `Failed to place trade: ${error.message}`);
-      this.pendingTrades.delete(messageId);
+      await logger.log('message_ignored', `Failed to place ${mode} trade for "${strategy.name}": ${error.message}`);
+      console.error(`[TradeManager] Error placing ${mode} trade for strategy ${strategy.id}:`, error.message);
+      pendingMap.delete(messageId);
     }
   }
 
+  /**
+   * Handle edited signal - updates SL/TP for all strategies with matching trades
+   */
   async handleEditedSignal(messageId: string, message: string, sl: number, tp: number): Promise<void> {
     console.log('[TradeManager] handleEditedSignal - MessageId:', messageId, 'SL:', sl, 'TP:', tp);
-    
-    const pending = this.pendingTrades.get(messageId);
-    console.log('[TradeManager] handleEditedSignal - Pending trade found:', pending ? 'YES' : 'NO');
 
-    if (!pending || !pending.tradeId) {
-      console.log('[TradeManager] handleEditedSignal - No pending trade found, ignoring');
-      await logger.log('message_ignored', 'No pending trade found for edited message');
-      return;
-    }
+    // Find all strategies that have a pending trade for this messageId
+    let updatedCount = 0;
 
-    const trade = this.activeTrades.get(pending.tradeId);
-    console.log('[TradeManager] handleEditedSignal - Active trade found:', trade ? 'YES' : 'NO');
+    for (const [strategyId, pendingMap] of this.pendingTrades.entries()) {
+      const pending = pendingMap.get(messageId);
+      if (!pending || !pending.tradeId) continue;
 
-    if (!trade) {
-      console.log('[TradeManager] handleEditedSignal - Trade not found in active trades');
-      await logger.log('message_ignored', 'Trade not found in active trades');
-      return;
-    }
+      const activeMap = this.getActiveMap(strategyId);
+      const trade = activeMap.get(pending.tradeId);
+      if (!trade) continue;
 
-    try {
-      // Check if trailing SL is enabled in config
-      const config = await getConfig();
-      const trailingDistance = config.trading.trailingStopDistance || 0;
+      try {
+        const strategy = await getStrategyById(strategyId);
+        if (!strategy) continue;
 
-      if (trailingDistance > 0) {
-        // Trailing SL is active - ignore SL/TP from edited message
-        console.log(`[TradeManager] handleEditedSignal - Trailing SL active (distance=${trailingDistance}), ignoring message SL/TP`);
-        await logger.log('message_received', `Edited message received but trailing SL is active. Ignoring SL=${sl}, TP=${tp}`);
-        
-        // Just update the trade record to note the edited message was received
+        const trailingDistance = strategy.trading.trailingStopDistance || 0;
+
+        if (trailingDistance > 0) {
+          // Trailing SL active - ignore SL/TP from edited message
+          console.log(`[TradeManager] Trailing SL active for strategy ${strategyId}, ignoring message SL/TP`);
+          await logger.log('message_received', `Edited message received but trailing SL active for ${strategy.name}. Ignoring SL=${sl}, TP=${tp}`);
+
+          await updateTrade(pending.tradeId, {
+            matchedMessage: {
+              ...trade.matchedMessage,
+              edited: message
+            }
+          });
+          continue;
+        }
+
+        if (trade.mode === 'LIVE') {
+          // LIVE: Update SL/TP on OANDA
+          const oandaTrades = await oandaService.getOpenTrades();
+          const matchingOandaTrade = oandaTrades.find(oandaTrade => {
+            const sameInstrument = oandaTrade.instrument === trade.symbol;
+            const similarPrice = Math.abs(parseFloat(oandaTrade.price) - trade.entryPrice) < 5;
+            const similarTime = Math.abs(new Date(oandaTrade.createTime).getTime() - new Date(trade.openTime).getTime()) < 120000;
+            return sameInstrument && (similarPrice || similarTime);
+          });
+
+          if (!matchingOandaTrade) {
+            console.warn(`[TradeManager] Live trade ${trade.id} not found on OANDA - may already be closed`);
+            await logger.log('message_ignored', `Cannot update SL/TP: Live trade ${trade.id} not found on OANDA`);
+            continue;
+          }
+
+          const oandaTradeId = matchingOandaTrade.id;
+          await updateTrade(trade.id, { oandaTradeId });
+          trade.oandaTradeId = oandaTradeId;
+
+          await oandaService.updateSLTP(oandaTradeId, String(sl), String(tp));
+          console.log(`[TradeManager] LIVE trade ${trade.id} SL/TP updated on OANDA`);
+        } else {
+          // PAPER: Update SL/TP locally only
+          console.log(`[TradeManager] PAPER trade ${trade.id} SL/TP updated locally`);
+        }
+
+        // Update trade record
         const updatedTrade = await updateTrade(pending.tradeId, {
+          sl,
+          tp,
+          pendingEdit: undefined,
           matchedMessage: {
             ...trade.matchedMessage,
             edited: message
@@ -206,253 +319,162 @@ class TradeManager {
         });
 
         if (updatedTrade) {
-          this.activeTrades.set(pending.tradeId, updatedTrade);
+          activeMap.set(pending.tradeId, updatedTrade);
         }
 
-        console.log('[TradeManager] handleEditedSignal - Trailing SL will manage SL automatically');
         await logger.tradeUpdated(updatedTrade || trade);
-        return;
+        updatedCount++;
+      } catch (error: any) {
+        console.error(`[TradeManager] Error updating SL/TP for strategy ${strategyId}:`, error.message);
+        await logger.log('message_ignored', `Failed to update SL/TP for strategy ${strategyId}: ${error.message}`);
       }
-
-      // Trailing SL not active - proceed with normal SL/TP update
-      // Always fetch from OANDA first - OANDA is the source of truth
-      console.log('[TradeManager] handleEditedSignal - Fetching open trades from OANDA...');
-      const oandaTrades = await oandaService.getOpenTrades();
-      console.log(`[TradeManager] Found ${oandaTrades.length} open trades on OANDA`);
-
-      // Find matching trade on OANDA by instrument and entry price
-      const matchingOandaTrade = oandaTrades.find(oandaTrade => {
-        const sameInstrument = oandaTrade.instrument === trade.symbol;
-        const similarPrice = Math.abs(parseFloat(oandaTrade.price) - trade.entryPrice) < 5;
-        const similarTime = Math.abs(new Date(oandaTrade.createTime).getTime() - new Date(trade.openTime).getTime()) < 120000;
-        return sameInstrument && (similarPrice || similarTime);
-      });
-
-      if (!matchingOandaTrade) {
-        console.warn(`[TradeManager] Trade ${trade.id} not found on OANDA - may already be closed`);
-        await logger.log('message_ignored', `Cannot update SL/TP: Trade ${trade.id} not found on OANDA`);
-        return;
-      }
-
-      // Use OANDA's actual trade ID
-      const oandaTradeId = matchingOandaTrade.id;
-      console.log(`[TradeManager] handleEditedSignal - Found OANDA trade: ${oandaTradeId} for internal trade: ${trade.id}`);
-
-      // Update local record with correct OANDA trade ID
-      await updateTrade(trade.id, { oandaTradeId });
-      trade.oandaTradeId = oandaTradeId;
-
-      console.log('[TradeManager] handleEditedSignal - Calling OANDA updateSLTP, TradeId:', oandaTradeId);
-
-      await oandaService.updateSLTP(oandaTradeId, String(sl), String(tp));
-
-      // Update trade record with SL/TP
-      const updatedTrade = await updateTrade(pending.tradeId, {
-        sl,
-        tp,
-        pendingEdit: undefined, // Clear pending edit
-        matchedMessage: {
-          ...trade.matchedMessage,
-          edited: message
-        }
-      });
-
-      if (updatedTrade) {
-        this.activeTrades.set(pending.tradeId, updatedTrade);
-      }
-
-      console.log('[TradeManager] handleEditedSignal - SL/TP updated successfully');
-      await logger.tradeUpdated(updatedTrade || trade);
-    } catch (error: any) {
-      console.error('[TradeManager] handleEditedSignal - Error:', error.message);
-      await logger.log('message_ignored', `Failed to update SL/TP: ${error.message}`);
     }
+
+    console.log(`[TradeManager] handleEditedSignal - Updated ${updatedCount} strategies`);
   }
 
-  private async handleTimeout(tradeId: string, messageId: string): Promise<void> {
-    const trade = this.activeTrades.get(tradeId);
+  private async handleTimeout(tradeId: string, strategyId: string): Promise<void> {
+    const activeMap = this.getActiveMap(strategyId);
+    const trade = activeMap.get(tradeId);
 
-    if (!trade) {
-      return;
-    }
+    if (!trade) return;
 
     try {
-      // Always fetch from OANDA first - OANDA is the source of truth
-      console.log(`[TradeManager] Fetching open trades from OANDA to find trade ${tradeId}...`);
-      const oandaTrades = await oandaService.getOpenTrades();
-      console.log(`[TradeManager] Found ${oandaTrades.length} open trades on OANDA`);
-
-      // Find matching trade on OANDA by instrument and entry price
-      const matchingOandaTrade = oandaTrades.find(oandaTrade => {
-        const sameInstrument = oandaTrade.instrument === trade.symbol;
-        const similarPrice = Math.abs(parseFloat(oandaTrade.price) - trade.entryPrice) < 5;
-        const similarTime = Math.abs(new Date(oandaTrade.createTime).getTime() - new Date(trade.openTime).getTime()) < 120000;
-        return sameInstrument && (similarPrice || similarTime);
-      });
-
-      if (!matchingOandaTrade) {
-        // Trade not found on OANDA open trades - likely already closed by TP/SL server-side
-        console.warn(`[TradeManager] handleTimeout - Trade ${tradeId} not found on OANDA open trades`);
-        await logger.log('message_ignored', `Trade ${tradeId} not found on OANDA, calculating PnL from current price`);
-
-        // Try to calculate PnL using current market price
-        try {
-          const currentPrice = await oandaService.getCurrentPrice(trade.symbol);
-          let closePrice = trade.entryPrice;
-          let pnl = 0;
-
-          if (currentPrice) {
-            closePrice = parseFloat(currentPrice.bid);
-            const priceDiff = closePrice - trade.entryPrice;
-            pnl = priceDiff * trade.lotSize * 100;
-            console.log(`[TradeManager] handleTimeout - Trade already closed, calculated PnL: ${pnl.toFixed(2)}`);
-          }
-
-          // Capture peak price even for already-closed trades
-          const peakPrice = priceService.getTradePeakPrice(tradeId);
-
-          const updatedTrade = await updateTrade(tradeId, {
-            status: 'CLOSED',
-            closeTime: new Date().toISOString(),
-            closePrice,
-            pnl,
-            pnlPercent: trade.entryPrice > 0 ? (pnl / (trade.entryPrice * trade.lotSize)) * 100 : 0,
-            peakPrice: peakPrice || undefined
-          });
-
-          if (updatedTrade) {
-            this.activeTrades.delete(tradeId);
-          }
-
-          // Clean up peak price tracking
-          priceService.removeTradePeakPrice(tradeId);
-
-          this.pendingTrades.delete(messageId);
-          await logger.tradeClosed(updatedTrade || trade);
-          return;
-        } catch (priceError: any) {
-          console.error(`[TradeManager] handleTimeout - Failed to fetch current price:`, priceError.message);
-        }
-
-        // Fallback - still capture peak price
-        const peakPrice = priceService.getTradePeakPrice(tradeId);
-
-        const updatedTrade = await updateTrade(tradeId, {
-          status: 'CLOSED',
-          closeTime: new Date().toISOString(),
-          closePrice: trade.entryPrice,
-          pnl: 0,
-          pnlPercent: 0,
-          peakPrice: peakPrice || undefined
+      if (trade.mode === 'LIVE') {
+        // Find on OANDA
+        const oandaTrades = await oandaService.getOpenTrades();
+        const matchingOandaTrade = oandaTrades.find(oandaTrade => {
+          const sameInstrument = oandaTrade.instrument === trade.symbol;
+          const similarPrice = Math.abs(parseFloat(oandaTrade.price) - trade.entryPrice) < 5;
+          const similarTime = Math.abs(new Date(oandaTrade.createTime).getTime() - new Date(trade.openTime).getTime()) < 120000;
+          return sameInstrument && (similarPrice || similarTime);
         });
 
-        if (updatedTrade) {
-          this.activeTrades.delete(tradeId);
+        if (!matchingOandaTrade) {
+          // Already closed server-side
+          await this.closeTradeLocally(tradeId, strategyId, 0, 0);
+          return;
         }
 
-        // Clean up peak price tracking
-        priceService.removeTradePeakPrice(tradeId);
+        const oandaTradeId = matchingOandaTrade.id;
+        await updateTrade(tradeId, { oandaTradeId });
+        trade.oandaTradeId = oandaTradeId;
 
-        this.pendingTrades.delete(messageId);
-        await logger.tradeClosed(updatedTrade || trade);
-        return;
+        const result = await oandaService.closePosition(oandaTradeId);
+        let pnl = parseFloat(result.pnl);
+        const closePrice = parseFloat(result.closePrice);
+
+        if (pnl === 0 && closePrice > 0) {
+          const priceDiff = closePrice - trade.entryPrice;
+          pnl = priceDiff * trade.lotSize * 100;
+        }
+
+        const peakPrice = priceService.getTradePeakPrice(tradeId);
+        await updateTrade(tradeId, {
+          status: 'CLOSED',
+          closeTime: new Date().toISOString(),
+          closePrice,
+          pnl,
+          pnlPercent: trade.entryPrice > 0 ? (pnl / (trade.entryPrice * trade.lotSize)) * 100 : 0,
+          peakPrice: peakPrice || undefined
+        });
+      } else {
+        // PAPER: Close locally with current price
+        const currentPrice = await oandaService.getCurrentPrice(trade.symbol);
+        const closePrice = currentPrice ? parseFloat(currentPrice.bid) : trade.entryPrice;
+        const pnl = (closePrice - trade.entryPrice) * trade.lotSize * 100;
+        const peakPrice = priceService.getTradePeakPrice(tradeId);
+
+        await updateTrade(tradeId, {
+          status: 'CLOSED',
+          closeTime: new Date().toISOString(),
+          closePrice,
+          pnl,
+          pnlPercent: trade.entryPrice > 0 ? (pnl / (trade.entryPrice * trade.lotSize)) * 100 : 0,
+          peakPrice: peakPrice || undefined
+        });
       }
 
-      // Update local record with correct OANDA trade ID
-      const oandaTradeId = matchingOandaTrade.id;
-      console.log(`[TradeManager] Found matching OANDA trade: ${oandaTradeId} for trade ${tradeId}`);
-      await updateTrade(tradeId, { oandaTradeId });
-      trade.oandaTradeId = oandaTradeId;
-
-      // Close position using OANDA trade ID
-      console.log(`[TradeManager] Closing trade via OANDA: ${oandaTradeId}`);
-      const result = await oandaService.closePosition(oandaTradeId);
-
-      // If OANDA didn't return PnL, calculate it manually
-      let pnl = parseFloat(result.pnl);
-      const closePrice = parseFloat(result.closePrice);
-
-      if (pnl === 0 && closePrice > 0) {
-        const priceDiff = closePrice - trade.entryPrice;
-        pnl = priceDiff * trade.lotSize * 100;
-        console.log(`[TradeManager] handleTimeout - OANDA returned PnL=0, calculated manually: ${pnl}`);
-      }
-
-      // Capture peak price before cleanup
-      const peakPrice = priceService.getTradePeakPrice(tradeId);
-
-      // Update trade record
-      const updatedTrade = await updateTrade(tradeId, {
-        status: 'CLOSED',
-        closeTime: new Date().toISOString(),
-        closePrice: closePrice,
-        pnl: pnl,
-        pnlPercent: trade.entryPrice > 0 ? (pnl / (trade.entryPrice * trade.lotSize)) * 100 : 0,
-        peakPrice: peakPrice || undefined
-      });
-
-      if (updatedTrade) {
-        this.activeTrades.delete(tradeId);
-      }
-
-      // Clean up peak price tracking
+      activeMap.delete(tradeId);
       priceService.removeTradePeakPrice(tradeId);
 
-      this.pendingTrades.delete(messageId);
-
-      await logger.tradeClosed(updatedTrade || trade);
+      const updatedTrade = await this.getTradeById(tradeId);
+      if (updatedTrade) await logger.tradeClosed(updatedTrade);
     } catch (error: any) {
       await logger.log('message_ignored', `Failed to close timed out trade: ${error.message}`);
       console.error(`[TradeManager] Error closing trade ${tradeId}:`, error.message);
     }
   }
 
+  /**
+   * Close a trade locally (helper for PAPER trades and already-closed LIVE trades)
+   */
+  private async closeTradeLocally(tradeId: string, strategyId: string, closePrice: number, pnl: number): Promise<void> {
+    const activeMap = this.getActiveMap(strategyId);
+    const trade = activeMap.get(tradeId);
+    if (!trade) return;
+
+    const peakPrice = priceService.getTradePeakPrice(tradeId);
+
+    const updatedTrade = await updateTrade(tradeId, {
+      status: 'CLOSED',
+      closeTime: new Date().toISOString(),
+      closePrice: closePrice || trade.entryPrice,
+      pnl,
+      pnlPercent: trade.entryPrice > 0 ? (pnl / (trade.entryPrice * trade.lotSize)) * 100 : 0,
+      peakPrice: peakPrice || undefined
+    });
+
+    if (updatedTrade) activeMap.delete(tradeId);
+    priceService.removeTradePeakPrice(tradeId);
+
+    if (updatedTrade) await logger.tradeClosed(updatedTrade);
+  }
+
+  /**
+   * Close trade manually (user-initiated)
+   */
   async closeTradeManually(tradeId: string): Promise<void> {
-    const trade = this.activeTrades.get(tradeId);
+    // Find trade across all strategies
+    for (const [strategyId, activeMap] of this.activeTrades.entries()) {
+      const trade = activeMap.get(tradeId);
+      if (!trade) continue;
 
-    if (!trade) {
-      throw new Error('Trade not found');
-    }
+      try {
+        if (trade.mode === 'LIVE') {
+          // LIVE: Close via OANDA
+          const oandaTrades = await oandaService.getOpenTrades();
+          const matchingOandaTrade = oandaTrades.find(oandaTrade => {
+            const sameInstrument = oandaTrade.instrument === trade.symbol;
+            const similarPrice = Math.abs(parseFloat(oandaTrade.price) - trade.entryPrice) < 5;
+            const similarTime = Math.abs(new Date(oandaTrade.createTime).getTime() - new Date(trade.openTime).getTime()) < 120000;
+            return sameInstrument && (similarPrice || similarTime);
+          });
 
-    try {
-      // Always fetch from OANDA first - OANDA is the source of truth
-      console.log(`[TradeManager] Fetching open trades from OANDA to find trade ${tradeId}...`);
-      const oandaTrades = await oandaService.getOpenTrades();
-      console.log(`[TradeManager] Found ${oandaTrades.length} open trades on OANDA`);
-
-      // Find matching trade on OANDA by instrument and entry price
-      const matchingOandaTrade = oandaTrades.find(oandaTrade => {
-        const sameInstrument = oandaTrade.instrument === trade.symbol;
-        const similarPrice = Math.abs(parseFloat(oandaTrade.price) - trade.entryPrice) < 5;
-        const similarTime = Math.abs(new Date(oandaTrade.createTime).getTime() - new Date(trade.openTime).getTime()) < 120000;
-        return sameInstrument && (similarPrice || similarTime);
-      });
-
-      if (!matchingOandaTrade) {
-        // Trade not found on OANDA open trades - likely already closed by TP/SL server-side
-        console.warn(`[TradeManager] Trade ${tradeId} not found on OANDA open trades - may already be closed by TP/SL`);
-        await logger.log('message_ignored', `Trade ${tradeId} not found on OANDA, calculating PnL from current price`);
-
-        // Try to calculate PnL using current market price
-        try {
-          const currentPrice = await oandaService.getCurrentPrice(trade.symbol);
-          let closePrice = trade.entryPrice;
-          let pnl = 0;
-
-          if (currentPrice) {
-            // For BUY trades, use bid price
-            closePrice = parseFloat(currentPrice.bid);
-            const priceDiff = closePrice - trade.entryPrice;
-            pnl = priceDiff * trade.lotSize * 100;
-            console.log(`[TradeManager] Trade already closed on OANDA, calculated PnL: ${pnl.toFixed(2)} (close: ${closePrice}, entry: ${trade.entryPrice})`);
-          } else {
-            console.warn(`[TradeManager] Could not fetch current price for ${trade.symbol}, using entry price`);
+          if (!matchingOandaTrade) {
+            // Already closed server-side
+            const currentPrice = await oandaService.getCurrentPrice(trade.symbol);
+            const closePrice = currentPrice ? parseFloat(currentPrice.bid) : trade.entryPrice;
+            const pnl = (closePrice - trade.entryPrice) * trade.lotSize * 100;
+            await this.closeTradeLocally(tradeId, strategyId, closePrice, pnl);
+            return;
           }
 
-          // Capture peak price even for already-closed trades
-          const peakPrice = priceService.getTradePeakPrice(tradeId);
+          const oandaTradeId = matchingOandaTrade.id;
+          await updateTrade(tradeId, { oandaTradeId });
+          trade.oandaTradeId = oandaTradeId;
 
-          const updatedTrade = await updateTrade(tradeId, {
+          const result = await oandaService.closePosition(oandaTradeId);
+          let pnl = parseFloat(result.pnl);
+          const closePrice = parseFloat(result.closePrice);
+
+          if (pnl === 0 && closePrice > 0) {
+            const priceDiff = closePrice - trade.entryPrice;
+            pnl = priceDiff * trade.lotSize * 100;
+          }
+
+          const peakPrice = priceService.getTradePeakPrice(tradeId);
+          await updateTrade(tradeId, {
             status: 'CLOSED',
             closeTime: new Date().toISOString(),
             closePrice,
@@ -460,144 +482,91 @@ class TradeManager {
             pnlPercent: trade.entryPrice > 0 ? (pnl / (trade.entryPrice * trade.lotSize)) * 100 : 0,
             peakPrice: peakPrice || undefined
           });
+        } else {
+          // PAPER: Close locally
+          const currentPrice = await oandaService.getCurrentPrice(trade.symbol);
+          const closePrice = currentPrice ? parseFloat(currentPrice.bid) : trade.entryPrice;
+          const pnl = (closePrice - trade.entryPrice) * trade.lotSize * 100;
+          const peakPrice = priceService.getTradePeakPrice(tradeId);
 
-          if (updatedTrade) {
-            this.activeTrades.delete(tradeId);
-          }
-
-          // Clean up peak price tracking
-          priceService.removeTradePeakPrice(tradeId);
-
-          await logger.tradeClosed(updatedTrade || trade);
-          return;
-        } catch (priceError: any) {
-          console.error(`[TradeManager] Failed to fetch current price for PnL calculation:`, priceError.message);
-          // Fall through to default PnL=0
+          await updateTrade(tradeId, {
+            status: 'CLOSED',
+            closeTime: new Date().toISOString(),
+            closePrice,
+            pnl,
+            pnlPercent: trade.entryPrice > 0 ? (pnl / (trade.entryPrice * trade.lotSize)) * 100 : 0,
+            peakPrice: peakPrice || undefined
+          });
         }
 
-        // Fallback - still capture peak price
-        const peakPrice = priceService.getTradePeakPrice(tradeId);
-
-        const updatedTrade = await updateTrade(tradeId, {
-          status: 'CLOSED',
-          closeTime: new Date().toISOString(),
-          closePrice: trade.entryPrice,
-          pnl: 0,
-          pnlPercent: 0,
-          peakPrice: peakPrice || undefined
-        });
-
-        if (updatedTrade) {
-          this.activeTrades.delete(tradeId);
-        }
-
-        // Clean up peak price tracking
+        activeMap.delete(tradeId);
         priceService.removeTradePeakPrice(tradeId);
 
-        await logger.tradeClosed(updatedTrade || trade);
+        const updatedTrade = await this.getTradeById(tradeId);
+        if (updatedTrade) await logger.tradeClosed(updatedTrade);
         return;
+      } catch (error: any) {
+        await logger.log('message_ignored', `Failed to close trade: ${error.message}`);
+        console.error(`[TradeManager] Error closing trade ${tradeId}:`, error.message);
+        throw error;
       }
-
-      // Update local record with correct OANDA trade ID
-      const oandaTradeId = matchingOandaTrade.id;
-      console.log(`[TradeManager] Found matching OANDA trade: ${oandaTradeId} for trade ${tradeId}`);
-      await updateTrade(tradeId, { oandaTradeId });
-      trade.oandaTradeId = oandaTradeId;
-
-      // Close position using OANDA trade ID
-      console.log(`[TradeManager] Closing trade via OANDA: ${oandaTradeId}`);
-      const result = await oandaService.closePosition(oandaTradeId);
-
-      // If OANDA didn't return PnL, calculate it manually
-      let pnl = parseFloat(result.pnl);
-      const closePrice = parseFloat(result.closePrice);
-
-      if (pnl === 0 && closePrice > 0) {
-        // Calculate PnL manually: (closePrice - entryPrice) * lotSize * 100
-        const priceDiff = closePrice - trade.entryPrice;
-        pnl = priceDiff * trade.lotSize * 100;
-        console.log(`[TradeManager] OANDA returned PnL=0, calculated manually: ${pnl}`);
-      }
-
-      // Capture peak price before cleanup
-      const peakPrice = priceService.getTradePeakPrice(tradeId);
-
-      const updatedTrade = await updateTrade(tradeId, {
-        status: 'CLOSED',
-        closeTime: new Date().toISOString(),
-        closePrice: closePrice,
-        pnl: pnl,
-        pnlPercent: trade.entryPrice > 0 ? (pnl / (trade.entryPrice * trade.lotSize)) * 100 : 0,
-        peakPrice: peakPrice || undefined
-      });
-
-      if (updatedTrade) {
-        this.activeTrades.delete(tradeId);
-      }
-
-      // Clean up peak price tracking
-      priceService.removeTradePeakPrice(tradeId);
-
-      await logger.tradeClosed(updatedTrade || trade);
-    } catch (error: any) {
-      await logger.log('message_ignored', `Failed to close trade: ${error.message}`);
-      console.error(`[TradeManager] Error closing trade ${tradeId}:`, error.message);
-      throw error;
     }
+
+    throw new Error('Trade not found');
   }
 
   /**
    * Handle "secure ur Profits" reply message
-   * Finds the open trade by the original signal message ID, checks if in profit, and closes if yes
+   * Checks ALL strategies with listenToReplies enabled and open trades for the signal message
    */
   async handleSecureProfitsReply(signalMessageId: string): Promise<void> {
     try {
-      const config = await getConfig();
+      const strategies = await getStrategies();
 
-      // Check if feature is enabled
-      if (!config.trading.listenToReplies) {
-        console.log('[TradeManager] handleSecureProfitsReply - listenToReplies is OFF, ignoring');
-        return;
-      }
+      for (const strategy of strategies) {
+        // Check if listenToReplies is enabled
+        if (!strategy.trading.listenToReplies) continue;
 
-      console.log('[TradeManager] handleSecureProfitsReply - Looking for open trade with telegramMessageId:', signalMessageId);
+        const activeMap = this.getActiveMap(strategy.id);
 
-      // Find open trade by telegram message ID
-      const openTrades = await getOpenTrades();
-      const matchingTrade = openTrades.find(t => t.telegramMessageId === signalMessageId);
+        // Find open trade for this signal message
+        let matchingTrade: Trade | undefined;
+        let matchingTradeId: string | undefined;
 
-      if (!matchingTrade) {
-        console.log('[TradeManager] handleSecureProfitsReply - No open trade found for telegramMessageId:', signalMessageId);
-        await logger.log('message_ignored', `No open trade found for signal message ${signalMessageId}`);
-        return;
-      }
+        for (const [tradeId, trade] of activeMap.entries()) {
+          if (trade.telegramMessageId === signalMessageId && trade.status === 'OPEN') {
+            matchingTrade = trade;
+            matchingTradeId = tradeId;
+            break;
+          }
+        }
 
-      console.log('[TradeManager] handleSecureProfitsReply - Found trade:', matchingTrade.id, 'Entry:', matchingTrade.entryPrice);
+        if (!matchingTrade || !matchingTradeId) continue;
 
-      // Get current market price
-      const currentPrice = await oandaService.getCurrentPrice(matchingTrade.symbol);
-      if (!currentPrice) {
-        console.warn('[TradeManager] handleSecureProfitsReply - Failed to get current price, skipping');
-        await logger.log('message_ignored', `Failed to get current price for trade ${matchingTrade.id}`);
-        return;
-      }
+        // Get current market price
+        const currentPrice = await oandaService.getCurrentPrice(matchingTrade.symbol);
+        if (!currentPrice) {
+          console.warn('[TradeManager] handleSecureProfitsReply - Failed to get current price, skipping');
+          await logger.log('message_ignored', `Failed to get current price for trade ${matchingTradeId}`);
+          continue;
+        }
 
-      // For BUY trades, use bid price to calculate profit
-      const currentBid = parseFloat(currentPrice.bid);
-      const priceDiff = currentBid - matchingTrade.entryPrice;
-      const pnl = priceDiff * matchingTrade.lotSize * 100;
+        const currentBid = parseFloat(currentPrice.bid);
+        const priceDiff = currentBid - matchingTrade.entryPrice;
+        const pnl = priceDiff * matchingTrade.lotSize * 100;
 
-      console.log('[TradeManager] handleSecureProfitsReply - Current bid:', currentBid, 'Entry:', matchingTrade.entryPrice, 'PnL:', pnl.toFixed(2));
+        console.log(`[TradeManager] handleSecureProfitsReply [${strategy.name}] - Current bid: ${currentBid}, Entry: ${matchingTrade.entryPrice}, PnL: ${pnl.toFixed(2)}`);
 
-      if (pnl > 0) {
-        // Trade is in profit - close it
-        console.log('[TradeManager] handleSecureProfitsReply - Trade is in profit, closing...');
-        await logger.log('message_received', `Reply "secure ur profits" detected. Trade ${matchingTrade.id} is in profit ($${pnl.toFixed(2)}), closing...`);
-        await this.closeTradeManually(matchingTrade.id);
-      } else {
-        // Trade is not in profit - skip closing
-        console.log('[TradeManager] handleSecureProfitsReply - Trade is NOT in profit, skipping close');
-        await logger.log('message_ignored', `Reply "secure ur profits" detected but trade ${matchingTrade.id} not in profit ($${pnl.toFixed(2)}), skipping`);
+        if (pnl > 0) {
+          // Trade is in profit - close it
+          console.log(`[TradeManager] handleSecureProfitsReply [${strategy.name}] - Trade is in profit, closing...`);
+          await logger.log('message_received', `Reply "secure ur profits" detected. Trade ${matchingTradeId} (${strategy.name}) is in profit ($${pnl.toFixed(2)}), closing...`);
+          await this.closeTradeManually(matchingTradeId);
+        } else {
+          // Trade is not in profit - skip closing
+          console.log(`[TradeManager] handleSecureProfitsReply [${strategy.name}] - Trade NOT in profit, skipping close`);
+          await logger.log('message_ignored', `Reply "secure ur profits" detected but trade ${matchingTradeId} (${strategy.name}) not in profit ($${pnl.toFixed(2)}), skipping`);
+        }
       }
     } catch (error: any) {
       console.error('[TradeManager] handleSecureProfitsReply - Error:', error.message);
@@ -605,22 +574,44 @@ class TradeManager {
     }
   }
 
-  async getActiveTrades(): Promise<Trade[]> {
-    return await getOpenTrades();
+  /**
+   * Get trade by ID across all strategies
+   */
+  private async getTradeById(tradeId: string): Promise<Trade | undefined> {
+    for (const activeMap of this.activeTrades.values()) {
+      const trade = activeMap.get(tradeId);
+      if (trade) return trade;
+    }
+    // Also check storage
+    const allTrades = await getTrades();
+    return allTrades.find(t => t.id === tradeId);
+  }
+
+  async getActiveTrades(strategyId?: string): Promise<Trade[]> {
+    if (strategyId) {
+      const activeMap = this.getActiveMap(strategyId);
+      return Array.from(activeMap.values());
+    }
+
+    // Return all active trades across all strategies
+    const allTrades: Trade[] = [];
+    for (const activeMap of this.activeTrades.values()) {
+      allTrades.push(...Array.from(activeMap.values()));
+    }
+    return allTrades;
   }
 
   /**
    * Start periodic trade age checker
-   * Closes trades that are older than closeTimeoutMinutes and have no SL/TP set
    */
   startPeriodicAgeChecker(): void {
-    if (this.ageCheckInterval) return; // Already running
+    if (this.ageCheckInterval) return;
 
     console.log('[TradeManager] Starting periodic trade age checker (every 60s)');
-    
+
     this.ageCheckInterval = setInterval(async () => {
       await this.checkTradeAges();
-    }, 60000); // Check every 60 seconds
+    }, 60000);
   }
 
   /**
@@ -628,21 +619,28 @@ class TradeManager {
    */
   private async checkTradeAges(): Promise<void> {
     try {
-      const config = await getConfig();
-      const timeoutMs = config.trading.closeTimeoutMinutes * 60 * 1000;
-      const openTrades = await getOpenTrades();
-      const now = new Date();
+      const strategies = await getStrategies();
+      const strategyMap = new Map<string, Strategy>();
+      strategies.forEach(s => strategyMap.set(s.id, s));
 
-      for (const trade of openTrades) {
-        // Skip trades that already have SL/TP set
-        if (trade.sl || trade.tp) continue;
+      for (const [strategyId, activeMap] of this.activeTrades.entries()) {
+        const strategy = strategyMap.get(strategyId);
+        if (!strategy) continue;
 
-        const tradeAge = now.getTime() - new Date(trade.openTime).getTime();
-        
-        if (tradeAge > timeoutMs) {
-          console.log(`[TradeManager] Trade ${trade.id} age (${Math.round(tradeAge / 1000)}s) exceeds timeout (${config.trading.closeTimeoutMinutes}m), closing...`);
-          await logger.log('message_received', `Trade ${trade.id} timed out without SL/TP, closing`);
-          await this.closeTradeManually(trade.id);
+        const timeoutMs = strategy.trading.closeTimeoutMinutes * 60 * 1000;
+        const now = new Date();
+
+        for (const [tradeId, trade] of activeMap.entries()) {
+          // Skip trades that already have SL/TP set
+          if (trade.sl || trade.tp) continue;
+
+          const tradeAge = now.getTime() - new Date(trade.openTime).getTime();
+
+          if (tradeAge > timeoutMs) {
+            console.log(`[TradeManager] Trade ${trade.id} (${strategy.name}) age (${Math.round(tradeAge / 1000)}s) exceeds timeout (${strategy.trading.closeTimeoutMinutes}m), closing...`);
+            await logger.log('message_received', `Trade ${trade.id} (${strategy.name}) timed out without SL/TP, closing`);
+            await this.closeTradeManually(trade.id);
+          }
         }
       }
     } catch (error: any) {
@@ -662,7 +660,6 @@ class TradeManager {
   }
 
   async cleanup(): Promise<void> {
-    // Stop periodic age checker
     this.stopPeriodicAgeChecker();
     this.pendingTrades.clear();
     this.activeTrades.clear();

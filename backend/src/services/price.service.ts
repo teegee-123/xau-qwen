@@ -55,14 +55,14 @@ class PriceService {
 
     try {
       const config = await getConfig();
-      let symbol = config.trading.symbol || 'XAU_USD';
+      let symbol = config.trading?.symbol || 'XAU_USD';
 
       // Auto-migrate common incorrect symbol formats
       if (symbol === 'XAUUSD') {
         console.log('[PriceService] Auto-correcting trading symbol from XAUUSD to XAU_USD for OANDA API compatibility');
         symbol = 'XAU_USD';
         // Update config with corrected symbol
-        config.trading.symbol = 'XAU_USD';
+        config.trading!.symbol = 'XAU_USD';
         await require('../storage/json-store').updateConfig({ trading: config.trading });
       }
 
@@ -439,7 +439,7 @@ class PriceService {
       
       // Try to reconnect
       if (this.isRunning && this.reconnectAttempts < this.maxReconnectAttempts) {
-        const config = getConfig().then(c => c.trading.symbol || 'XAU_USD');
+        const config = getConfig().then(c => c.trading?.symbol || 'XAU_USD');
         config.then(symbol => this.scheduleReconnect(symbol));
       }
     }, this.heartbeatIntervalMs);
