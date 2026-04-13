@@ -190,6 +190,7 @@ export interface Config {
     maxRetries: number;
     retryDelayMs: number;
     trailingStopDistance: number; // 0 = disabled, >0 = trailing SL active
+    listenToReplies: boolean; // When true, listen for "secure ur Profits" replies and close profitable trades
   };
   messages: {
     initialPattern: string;
@@ -220,7 +221,8 @@ const DEFAULT_CONFIG: Config = {
     closeTimeoutMinutes: 3,
     maxRetries: 3,
     retryDelayMs: 2000,
-    trailingStopDistance: 0 // Disabled by default
+    trailingStopDistance: 0, // Disabled by default
+    listenToReplies: false // Disabled by default
   },
   messages: {
     initialPattern: '',

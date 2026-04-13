@@ -511,7 +511,7 @@ class TradeManager {
       // If OANDA didn't return PnL, calculate it manually
       let pnl = parseFloat(result.pnl);
       const closePrice = parseFloat(result.closePrice);
-      
+
       if (pnl === 0 && closePrice > 0) {
         // Calculate PnL manually: (closePrice - entryPrice) * lotSize * 100
         const priceDiff = closePrice - trade.entryPrice;
@@ -543,6 +543,65 @@ class TradeManager {
       await logger.log('message_ignored', `Failed to close trade: ${error.message}`);
       console.error(`[TradeManager] Error closing trade ${tradeId}:`, error.message);
       throw error;
+    }
+  }
+
+  /**
+   * Handle "secure ur Profits" reply message
+   * Finds the open trade by the original signal message ID, checks if in profit, and closes if yes
+   */
+  async handleSecureProfitsReply(signalMessageId: string): Promise<void> {
+    try {
+      const config = await getConfig();
+
+      // Check if feature is enabled
+      if (!config.trading.listenToReplies) {
+        console.log('[TradeManager] handleSecureProfitsReply - listenToReplies is OFF, ignoring');
+        return;
+      }
+
+      console.log('[TradeManager] handleSecureProfitsReply - Looking for open trade with telegramMessageId:', signalMessageId);
+
+      // Find open trade by telegram message ID
+      const openTrades = await getOpenTrades();
+      const matchingTrade = openTrades.find(t => t.telegramMessageId === signalMessageId);
+
+      if (!matchingTrade) {
+        console.log('[TradeManager] handleSecureProfitsReply - No open trade found for telegramMessageId:', signalMessageId);
+        await logger.log('message_ignored', `No open trade found for signal message ${signalMessageId}`);
+        return;
+      }
+
+      console.log('[TradeManager] handleSecureProfitsReply - Found trade:', matchingTrade.id, 'Entry:', matchingTrade.entryPrice);
+
+      // Get current market price
+      const currentPrice = await oandaService.getCurrentPrice(matchingTrade.symbol);
+      if (!currentPrice) {
+        console.warn('[TradeManager] handleSecureProfitsReply - Failed to get current price, skipping');
+        await logger.log('message_ignored', `Failed to get current price for trade ${matchingTrade.id}`);
+        return;
+      }
+
+      // For BUY trades, use bid price to calculate profit
+      const currentBid = parseFloat(currentPrice.bid);
+      const priceDiff = currentBid - matchingTrade.entryPrice;
+      const pnl = priceDiff * matchingTrade.lotSize * 100;
+
+      console.log('[TradeManager] handleSecureProfitsReply - Current bid:', currentBid, 'Entry:', matchingTrade.entryPrice, 'PnL:', pnl.toFixed(2));
+
+      if (pnl > 0) {
+        // Trade is in profit - close it
+        console.log('[TradeManager] handleSecureProfitsReply - Trade is in profit, closing...');
+        await logger.log('message_received', `Reply "secure ur profits" detected. Trade ${matchingTrade.id} is in profit ($${pnl.toFixed(2)}), closing...`);
+        await this.closeTradeManually(matchingTrade.id);
+      } else {
+        // Trade is not in profit - skip closing
+        console.log('[TradeManager] handleSecureProfitsReply - Trade is NOT in profit, skipping close');
+        await logger.log('message_ignored', `Reply "secure ur profits" detected but trade ${matchingTrade.id} not in profit ($${pnl.toFixed(2)}), skipping`);
+      }
+    } catch (error: any) {
+      console.error('[TradeManager] handleSecureProfitsReply - Error:', error.message);
+      await logger.log('message_ignored', `Failed to handle secure profits reply: ${error.message}`);
     }
   }
 

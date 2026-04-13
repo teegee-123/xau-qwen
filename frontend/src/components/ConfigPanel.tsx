@@ -33,6 +33,7 @@ interface Config {
     maxRetries: number;
     retryDelayMs: number;
     trailingStopDistance?: number;
+    listenToReplies?: boolean;
   };
   messages: {
     initialPattern: string;
@@ -1012,6 +1013,27 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ onSave }) => {
             <p className="text-xs text-trade-gray mt-1">
               When set, SL trails behind the highest price by this distance. TP is disabled.
             </p>
+          </div>
+          <div className="md:col-span-3">
+            <label className="flex items-center gap-3 cursor-pointer">
+              <div className="relative">
+                <input
+                  type="checkbox"
+                  checked={config.trading.listenToReplies || false}
+                  onChange={(e) => updateTrading('listenToReplies', e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-10 h-6 bg-trade-gray rounded-full peer-checked:bg-trade-green peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-trade-green transition-colors"></div>
+                <div className="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-4"></div>
+              </div>
+              <div>
+                <span className="text-sm text-white font-medium">Listen to Replies</span>
+                <p className="text-xs text-trade-gray">
+                  When enabled, the bot monitors for replies to signal messages containing &quot;secure ur Profits&quot;.
+                  If detected and the trade is in profit, it closes the trade.
+                </p>
+              </div>
+            </label>
           </div>
           <div>
             <label className="block text-xs text-trade-gray mb-1">Max Retries</label>
