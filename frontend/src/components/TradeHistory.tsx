@@ -24,8 +24,44 @@ interface Trade {
   mode?: 'LIVE' | 'PAPER';
 }
 
+export interface Strategy {
+  id: string;
+  name: string;
+  isActive: boolean;
+  channels: string[];
+  trading: {
+    lotSize: number;
+    symbol: string;
+    closeTimeoutMinutes: number;
+    maxRetries: number;
+    retryDelayMs: number;
+    trailingStopDistance: number;
+    listenToReplies: boolean;
+  };
+}
+
+interface StrategySummaryRow {
+  strategyId: string;
+  strategyName: string;
+  spotPnlSum: number;
+  spotPnlAvg: number;
+  totalTrades: number;
+  winRate: number;
+  wins: number;
+  losses: number;
+  bestTrade: number | null;
+  worstTrade: number | null;
+  avgTrade: number;
+  avgWin: number | null;
+  avgLoss: number | null;
+  largestDD: number | null;
+  earliestOpen: string | null;
+  latestClose: string | null;
+}
+
 interface TradeHistoryProps {
   trades: Trade[];
+  strategies?: Strategy[];
 }
 
 const TradeTooltip: React.FC<{ trade: Trade }> = ({ trade }) => {
@@ -49,7 +85,7 @@ const TradeTooltip: React.FC<{ trade: Trade }> = ({ trade }) => {
 
 type DateFilter = '24h' | '7d' | '30d' | 'all';
 
-export const TradeHistory: React.FC<TradeHistoryProps> = ({ trades }) => {
+export const TradeHistory: React.FC<TradeHistoryProps> = ({ trades, strategies }) => {
   const [showTooltip, setShowTooltip] = useState<string | null>(null);
   const [dateFilter, setDateFilter] = useState<DateFilter>('all');
 
@@ -104,6 +140,100 @@ export const TradeHistory: React.FC<TradeHistoryProps> = ({ trades }) => {
       case 'all': return 'All Time';
     }
   };
+
+  // Strategy summary computation
+  const strategySummary = useMemo((): StrategySummaryRow[] => {
+    // Build a map of all strategy IDs from the strategies prop
+    const strategyMap = new Map<string, string>();
+    if (strategies) {
+      strategies.forEach(s => strategyMap.set(s.id, s.name));
+    }
+
+    // Collect all unique strategyIds from trades
+    const tradeStrategyIds = new Set<string>();
+    trades.forEach(t => {
+      if (t.strategyId) tradeStrategyIds.add(t.strategyId);
+    });
+
+    // Merge: all strategies from prop + any from trades
+    const allIds = new Set([...strategyMap.keys(), ...tradeStrategyIds]);
+    if (allIds.size === 0) return [];
+
+    const rows: StrategySummaryRow[] = [];
+
+    for (const id of allIds) {
+      const name = strategyMap.get(id) ||
+        trades.find(t => t.strategyId === id)?.strategyName ||
+        'Unknown';
+
+      const stratTrades = trades.filter(t => t.strategyId === id);
+
+      const pnls = stratTrades.map(t => t.pnl || 0);
+      const pnlPercents = stratTrades.map(t => t.pnlPercent || 0);
+      const wins = stratTrades.filter(t => (t.pnl || 0) > 0);
+      const losses = stratTrades.filter(t => (t.pnl || 0) <= 0);
+
+      const winPnls = wins.map(t => t.pnl || 0);
+      const lossPnls = losses.map(t => t.pnl || 0);
+
+      const opens = stratTrades.map(t => t.openTime).filter((t): t is string => !!t).sort();
+      const closes = stratTrades.map(t => t.closeTime).filter((t): t is string => !!t).sort();
+
+      rows.push({
+        strategyId: id,
+        strategyName: name,
+        spotPnlSum: pnlPercents.reduce((a, b) => a + b, 0),
+        spotPnlAvg: pnlPercents.length > 0 ? pnlPercents.reduce((a, b) => a + b, 0) / pnlPercents.length : 0,
+        totalTrades: stratTrades.length,
+        winRate: stratTrades.length > 0 ? (wins.length / stratTrades.length) * 100 : 0,
+        wins: wins.length,
+        losses: losses.length,
+        bestTrade: pnls.length > 0 ? Math.max(...pnls) : null,
+        worstTrade: pnls.length > 0 ? Math.min(...pnls) : null,
+        avgTrade: pnls.length > 0 ? pnls.reduce((a, b) => a + b, 0) / pnls.length : 0,
+        avgWin: winPnls.length > 0 ? winPnls.reduce((a, b) => a + b, 0) / winPnls.length : null,
+        avgLoss: lossPnls.length > 0 ? lossPnls.reduce((a, b) => a + b, 0) / lossPnls.length : null,
+        largestDD: lossPnls.length > 0 ? Math.min(...lossPnls) : null,
+        earliestOpen: opens.length > 0 ? opens[0] : null,
+        latestClose: closes.length > 0 ? closes[closes.length - 1] : null,
+      });
+    }
+
+    return rows;
+  }, [trades, strategies]);
+
+  // Total row
+  const totalRow = useMemo((): StrategySummaryRow | null => {
+    if (trades.length === 0) return null;
+
+    const pnls = trades.map(t => t.pnl || 0);
+    const pnlPercents = trades.map(t => t.pnlPercent || 0);
+    const wins = trades.filter(t => (t.pnl || 0) > 0);
+    const losses = trades.filter(t => (t.pnl || 0) <= 0);
+    const winPnls = wins.map(t => t.pnl || 0);
+    const lossPnls = losses.map(t => t.pnl || 0);
+    const opens = trades.map(t => t.openTime).filter((t): t is string => !!t).sort();
+    const closes = trades.map(t => t.closeTime).filter((t): t is string => !!t).sort();
+
+    return {
+      strategyId: '__total__',
+      strategyName: 'Total',
+      spotPnlSum: pnlPercents.reduce((a, b) => a + b, 0),
+      spotPnlAvg: pnlPercents.length > 0 ? pnlPercents.reduce((a, b) => a + b, 0) / pnlPercents.length : 0,
+      totalTrades: trades.length,
+      winRate: trades.length > 0 ? (wins.length / trades.length) * 100 : 0,
+      wins: wins.length,
+      losses: losses.length,
+      bestTrade: pnls.length > 0 ? Math.max(...pnls) : null,
+      worstTrade: pnls.length > 0 ? Math.min(...pnls) : null,
+      avgTrade: pnls.length > 0 ? pnls.reduce((a, b) => a + b, 0) / pnls.length : 0,
+      avgWin: winPnls.length > 0 ? winPnls.reduce((a, b) => a + b, 0) / winPnls.length : null,
+      avgLoss: lossPnls.length > 0 ? lossPnls.reduce((a, b) => a + b, 0) / lossPnls.length : null,
+      largestDD: lossPnls.length > 0 ? Math.min(...lossPnls) : null,
+      earliestOpen: opens.length > 0 ? opens[0] : null,
+      latestClose: closes.length > 0 ? closes[closes.length - 1] : null,
+    };
+  }, [trades]);
 
   return (
     <div className="bg-trade-dark rounded-lg p-4">
@@ -234,6 +364,110 @@ export const TradeHistory: React.FC<TradeHistoryProps> = ({ trades }) => {
           </table>
         </div>
       )}
+
+      {/* Strategy Summary Section */}
+      <div className="mt-6">
+        <h4 className="text-sm font-semibold text-trade-green mb-3">Strategy Summary</h4>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-trade-gray border-b border-trade-card">
+                <th className="text-left py-2 px-2">Strategy</th>
+                <th className="text-right py-2 px-2">Spot P&L % (Sum)</th>
+                <th className="text-right py-2 px-2">Spot P&L % (Avg)</th>
+                <th className="text-right py-2 px-2">Total Trades</th>
+                <th className="text-right py-2 px-2">Win Rate</th>
+                <th className="text-right py-2 px-2">W / L</th>
+                <th className="text-right py-2 px-2">Best Trade</th>
+                <th className="text-right py-2 px-2">Worst Trade</th>
+                <th className="text-right py-2 px-2">Avg Trade ($)</th>
+                <th className="text-right py-2 px-2">Avg Win ($)</th>
+                <th className="text-right py-2 px-2">Avg Loss ($)</th>
+                <th className="text-right py-2 px-2">Largest DD</th>
+              </tr>
+            </thead>
+            <tbody>
+              {strategySummary.map((row) => (
+                <tr key={row.strategyId} className="border-b border-trade-card hover:bg-trade-card/50 transition-colors">
+                  <td className="py-2 px-2 font-medium text-white">{row.strategyName}</td>
+                  <td className={`py-2 px-2 text-right font-semibold ${row.spotPnlSum >= 0 ? 'text-trade-green' : 'text-trade-red'}`}>
+                    {row.spotPnlSum.toFixed(2)}%
+                  </td>
+                  <td className={`py-2 px-2 text-right font-semibold ${row.spotPnlAvg >= 0 ? 'text-trade-green' : 'text-trade-red'}`}>
+                    {row.spotPnlAvg.toFixed(2)}%
+                  </td>
+                  <td className="py-2 px-2 text-right text-trade-gray">{row.totalTrades}</td>
+                  <td className={`py-2 px-2 text-right font-semibold ${row.winRate >= 50 ? 'text-trade-green' : row.winRate > 0 ? 'text-trade-red' : 'text-trade-gray'}`}>
+                    {row.totalTrades > 0 ? `${row.winRate.toFixed(1)}%` : '-'}
+                  </td>
+                  <td className="py-2 px-2 text-right">
+                    <span className="text-trade-green">{row.wins}</span>
+                    <span className="text-trade-gray"> / </span>
+                    <span className="text-trade-red">{row.losses}</span>
+                  </td>
+                  <td className="py-2 px-2 text-right text-trade-green font-semibold">
+                    {row.bestTrade !== null ? `$${row.bestTrade.toFixed(2)}` : '-'}
+                  </td>
+                  <td className="py-2 px-2 text-right text-trade-red font-semibold">
+                    {row.worstTrade !== null ? `$${row.worstTrade.toFixed(2)}` : '-'}
+                  </td>
+                  <td className={`py-2 px-2 text-right font-semibold ${row.avgTrade >= 0 ? 'text-trade-green' : 'text-trade-red'}`}>
+                    ${row.avgTrade.toFixed(2)}
+                  </td>
+                  <td className="py-2 px-2 text-right text-trade-green">
+                    {row.avgWin !== null ? `$${row.avgWin.toFixed(2)}` : '-'}
+                  </td>
+                  <td className="py-2 px-2 text-right text-trade-red">
+                    {row.avgLoss !== null ? `$${row.avgLoss.toFixed(2)}` : '-'}
+                  </td>
+                  <td className="py-2 px-2 text-right text-trade-red font-semibold">
+                    {row.largestDD !== null ? `$${row.largestDD.toFixed(2)}` : '-'}
+                  </td>
+                </tr>
+              ))}
+              {/* Total Row */}
+              {totalRow && (
+                <tr className="border-t-2 border-trade-green bg-trade-card/30 font-bold">
+                  <td className="py-2 px-2 text-white">{totalRow.strategyName}</td>
+                  <td className={`py-2 px-2 text-right ${totalRow.spotPnlSum >= 0 ? 'text-trade-green' : 'text-trade-red'}`}>
+                    {totalRow.spotPnlSum.toFixed(2)}%
+                  </td>
+                  <td className={`py-2 px-2 text-right ${totalRow.spotPnlAvg >= 0 ? 'text-trade-green' : 'text-trade-red'}`}>
+                    {totalRow.spotPnlAvg.toFixed(2)}%
+                  </td>
+                  <td className="py-2 px-2 text-right text-trade-gray">{totalRow.totalTrades}</td>
+                  <td className={`py-2 px-2 text-right ${totalRow.winRate >= 50 ? 'text-trade-green' : totalRow.winRate > 0 ? 'text-trade-red' : 'text-trade-gray'}`}>
+                    {totalRow.totalTrades > 0 ? `${totalRow.winRate.toFixed(1)}%` : '-'}
+                  </td>
+                  <td className="py-2 px-2 text-right">
+                    <span className="text-trade-green">{totalRow.wins}</span>
+                    <span className="text-trade-gray"> / </span>
+                    <span className="text-trade-red">{totalRow.losses}</span>
+                  </td>
+                  <td className="py-2 px-2 text-right text-trade-green">
+                    {totalRow.bestTrade !== null ? `$${totalRow.bestTrade.toFixed(2)}` : '-'}
+                  </td>
+                  <td className="py-2 px-2 text-right text-trade-red">
+                    {totalRow.worstTrade !== null ? `$${totalRow.worstTrade.toFixed(2)}` : '-'}
+                  </td>
+                  <td className={`py-2 px-2 text-right ${totalRow.avgTrade >= 0 ? 'text-trade-green' : 'text-trade-red'}`}>
+                    ${totalRow.avgTrade.toFixed(2)}
+                  </td>
+                  <td className="py-2 px-2 text-right text-trade-green">
+                    {totalRow.avgWin !== null ? `$${totalRow.avgWin.toFixed(2)}` : '-'}
+                  </td>
+                  <td className="py-2 px-2 text-right text-trade-red">
+                    {totalRow.avgLoss !== null ? `$${totalRow.avgLoss.toFixed(2)}` : '-'}
+                  </td>
+                  <td className="py-2 px-2 text-right text-trade-red">
+                    {totalRow.largestDD !== null ? `$${totalRow.largestDD.toFixed(2)}` : '-'}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 };
