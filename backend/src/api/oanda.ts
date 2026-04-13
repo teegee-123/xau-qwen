@@ -129,7 +129,7 @@ router.get('/price/:instrument', async (req, res) => {
 router.get('/price', (req, res) => {
   try {
     const currentPrice = priceService.getCurrentPrice();
-    
+
     if (!currentPrice) {
       return res.json({
         success: false,
@@ -147,6 +147,18 @@ router.get('/price', (req, res) => {
     res.status(500).json({
       success: false,
       message: `Failed to get current price: ${error.message}`
+    });
+  }
+});
+
+// Get price service status (streaming/polling state)
+router.get('/price/status', (req, res) => {
+  try {
+    const status = priceService.getServiceStatus();
+    res.json(status);
+  } catch (error: any) {
+    res.status(500).json({
+      error: error.message
     });
   }
 });

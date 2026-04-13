@@ -35,7 +35,7 @@ class PriceService {
 
   // Polling fallback
   private priceInterval: NodeJS.Timeout | null = null;
-  private pollIntervalMs = 5000; // 5 seconds
+  private pollIntervalMs = 1000; // 1 second (streaming unreliable on Render)
 
   /**
    * Set Socket.IO instance for broadcasting
@@ -70,7 +70,7 @@ class PriceService {
 
       // Try streaming first
       const streamStarted = await this.startStreaming(symbol);
-      
+
       if (!streamStarted) {
         console.warn('[PriceService] Streaming failed, falling back to polling');
         this.startPolling(symbol);
@@ -114,19 +114,23 @@ class PriceService {
       this.streamPrices(streamEndpoint, symbol, token).catch(error => {
         console.error('[PriceService] Stream error:', error.message);
         this.isStreaming = false;
-        
-        // Try to reconnect if still running
-        if (this.isRunning && this.reconnectAttempts < this.maxReconnectAttempts) {
-          this.scheduleReconnect(symbol);
-        } else if (this.isRunning) {
-          console.warn('[PriceService] Max reconnect attempts reached, falling back to polling');
+
+        // Start polling immediately when stream dies to keep prices fresh
+        if (this.isRunning) {
           this.startPolling(symbol);
         }
+
+        // Try to reconnect with unlimited attempts
+        this.scheduleReconnect(symbol);
       });
 
       this.isStreaming = true;
       this.reconnectAttempts = 0;
       console.log('[PriceService] ✅ Streaming price updates started');
+
+      // Stop polling if it was running (streaming took over)
+      this.stopPolling();
+
       return true;
     } catch (error: any) {
       console.error('[PriceService] Failed to start streaming:', error.message);
@@ -431,19 +435,25 @@ class PriceService {
   /**
    * Reset heartbeat timeout - if no heartbeat received, assume stream is dead
    */
-  private resetHeartbeatTimeout(): void {
+  private resetHeartbeatTimeout(symbol?: string): void {
     if (this.heartbeatTimeout) {
       clearTimeout(this.heartbeatTimeout);
     }
 
-    this.heartbeatTimeout = setTimeout(() => {
-      console.warn('[PriceService] ⚠️ Heartbeat timeout - stream may be disconnected');
+    this.heartbeatTimeout = setTimeout(async () => {
+      console.warn('[PriceService] ⚠️ Heartbeat timeout - stream disconnected, starting polling for price continuity');
       this.isStreaming = false;
-      
-      // Try to reconnect
-      if (this.isRunning && this.reconnectAttempts < this.maxReconnectAttempts) {
-        const config = getConfig().then(c => c.trading?.symbol || 'XAU_USD');
-        config.then(symbol => this.scheduleReconnect(symbol));
+
+      // Start polling immediately to keep prices fresh during reconnect
+      if (this.isRunning && !this.priceInterval) {
+        const sym = symbol || this.currentPrice?.symbol || 'XAU_USD';
+        this.startPolling(sym);
+      }
+
+      // Try to reconnect streaming
+      if (this.isRunning) {
+        const sym = symbol || this.currentPrice?.symbol || 'XAU_USD';
+        this.scheduleReconnect(sym);
       }
     }, this.heartbeatIntervalMs);
   }
@@ -472,7 +482,18 @@ class PriceService {
   }
 
   /**
-   * Start polling as fallback (every 5 seconds)
+   * Stop polling (called when streaming takes over or on shutdown)
+   */
+  private stopPolling(): void {
+    if (this.priceInterval) {
+      clearInterval(this.priceInterval);
+      this.priceInterval = null;
+      console.log('[PriceService] Polling stopped');
+    }
+  }
+
+  /**
+   * Start polling as fallback (every 1 second)
    */
   private startPolling(symbol: string): void {
     if (this.priceInterval) {
@@ -602,6 +623,28 @@ class PriceService {
    */
   getStatus(): boolean {
     return this.isRunning;
+  }
+
+  /**
+   * Get price service status for API
+   */
+  getServiceStatus(): {
+    isStreaming: boolean;
+    isRunning: boolean;
+    reconnectAttempts: number;
+    currentPrice: { symbol: string; bid: number; ask: number; timestamp: string } | null;
+  } {
+    return {
+      isStreaming: this.isStreaming,
+      isRunning: this.isRunning,
+      reconnectAttempts: this.reconnectAttempts,
+      currentPrice: this.currentPrice ? {
+        symbol: this.currentPrice.symbol,
+        bid: this.currentPrice.bid,
+        ask: this.currentPrice.ask,
+        timestamp: this.currentPrice.timestamp
+      } : null
+    };
   }
 
   /**
