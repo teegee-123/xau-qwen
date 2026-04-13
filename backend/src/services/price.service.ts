@@ -384,12 +384,12 @@ class PriceService {
             console.log(`[PriceService] ⚠️ SL hit for trade ${trade.id}: ${currentBid} <= ${trade.sl}`);
             await logger.log('message_received', `SL hit for trade ${trade.id}: ${currentBid} <= ${trade.sl}`);
             this.recentlyCheckedTrades.add(trade.id);
-            await this.closeTradeWithRetry(trade.id);
+            await this.closeTradeWithRetry(trade.id, 'SL Hit');
           } else if (trade.tp && currentBid >= trade.tp) {
             console.log(`[PriceService] ✅ TP hit for trade ${trade.id}: ${currentBid} >= ${trade.tp}`);
             await logger.log('message_received', `TP hit for trade ${trade.id}: ${currentBid} >= ${trade.tp}`);
             this.recentlyCheckedTrades.add(trade.id);
-            await this.closeTradeWithRetry(trade.id);
+            await this.closeTradeWithRetry(trade.id, 'TP Hit');
           }
         }
         // For SELL trades: SL violated when ask >= SL, TP violated when ask <= TP
@@ -398,12 +398,12 @@ class PriceService {
             console.log(`[PriceService] ⚠️ SL hit for trade ${trade.id}: ${currentAsk} >= ${trade.sl}`);
             await logger.log('message_received', `SL hit for trade ${trade.id}: ${currentAsk} >= ${trade.sl}`);
             this.recentlyCheckedTrades.add(trade.id);
-            await this.closeTradeWithRetry(trade.id);
+            await this.closeTradeWithRetry(trade.id, 'SL Hit');
           } else if (trade.tp && currentAsk <= trade.tp) {
             console.log(`[PriceService] ✅ TP hit for trade ${trade.id}: ${currentAsk} <= ${trade.tp}`);
             await logger.log('message_received', `TP hit for trade ${trade.id}: ${currentAsk} <= ${trade.tp}`);
             this.recentlyCheckedTrades.add(trade.id);
-            await this.closeTradeWithRetry(trade.id);
+            await this.closeTradeWithRetry(trade.id, 'TP Hit');
           }
         }
       }
@@ -415,9 +415,9 @@ class PriceService {
   /**
    * Close a trade with retry logic
    */
-  private async closeTradeWithRetry(tradeId: string): Promise<void> {
+  private async closeTradeWithRetry(tradeId: string, reason: string = 'Manual Close'): Promise<void> {
     try {
-      await tradeManager.closeTradeManually(tradeId);
+      await tradeManager.closeTradeManually(tradeId, reason);
     } catch (error: any) {
       console.error(`[PriceService] Failed to close trade ${tradeId}:`, error.message);
       // If close fails, remove from recently checked so we can retry

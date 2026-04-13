@@ -95,6 +95,8 @@ export interface Trade {
   trailingStopDistance?: number; // Distance in points for trailing SL (0 = disabled)
   // Price tracking
   peakPrice?: number; // Highest price reached during trade life (All Time High)
+  // Close tracking
+  closeReason?: string; // Why the trade was closed: "SL Hit", "TP Hit", "Manual Close", "Timeout", "Secure Profits Reply"
 }
 
 export async function getTrades(): Promise<Trade[]> {

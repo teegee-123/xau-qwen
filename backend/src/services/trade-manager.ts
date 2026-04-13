@@ -353,7 +353,7 @@ class TradeManager {
 
         if (!matchingOandaTrade) {
           // Already closed server-side
-          await this.closeTradeLocally(tradeId, strategyId, 0, 0);
+          await this.closeTradeLocally(tradeId, strategyId, 0, 0, 'Timeout');
           return;
         }
 
@@ -377,7 +377,8 @@ class TradeManager {
           closePrice,
           pnl,
           pnlPercent: trade.entryPrice > 0 ? (pnl / (trade.entryPrice * trade.lotSize)) * 100 : 0,
-          peakPrice: peakPrice || undefined
+          peakPrice: peakPrice || undefined,
+          closeReason: 'Timeout'
         });
       } else {
         // PAPER: Close locally with current price
@@ -392,7 +393,8 @@ class TradeManager {
           closePrice,
           pnl,
           pnlPercent: trade.entryPrice > 0 ? (pnl / (trade.entryPrice * trade.lotSize)) * 100 : 0,
-          peakPrice: peakPrice || undefined
+          peakPrice: peakPrice || undefined,
+          closeReason: 'Timeout'
         });
       }
 
@@ -410,7 +412,7 @@ class TradeManager {
   /**
    * Close a trade locally (helper for PAPER trades and already-closed LIVE trades)
    */
-  private async closeTradeLocally(tradeId: string, strategyId: string, closePrice: number, pnl: number): Promise<void> {
+  private async closeTradeLocally(tradeId: string, strategyId: string, closePrice: number, pnl: number, reason: string = 'Manual Close'): Promise<void> {
     const activeMap = this.getActiveMap(strategyId);
     const trade = activeMap.get(tradeId);
     if (!trade) return;
@@ -423,7 +425,8 @@ class TradeManager {
       closePrice: closePrice || trade.entryPrice,
       pnl,
       pnlPercent: trade.entryPrice > 0 ? (pnl / (trade.entryPrice * trade.lotSize)) * 100 : 0,
-      peakPrice: peakPrice || undefined
+      peakPrice: peakPrice || undefined,
+      closeReason: reason
     });
 
     if (updatedTrade) activeMap.delete(tradeId);
@@ -433,9 +436,9 @@ class TradeManager {
   }
 
   /**
-   * Close trade manually (user-initiated)
+   * Close trade manually (user-initiated or from other triggers)
    */
-  async closeTradeManually(tradeId: string): Promise<void> {
+  async closeTradeManually(tradeId: string, reason: string = 'Manual Close'): Promise<void> {
     // Find trade across all strategies
     for (const [strategyId, activeMap] of this.activeTrades.entries()) {
       const trade = activeMap.get(tradeId);
@@ -457,7 +460,7 @@ class TradeManager {
             const currentPrice = await oandaService.getCurrentPrice(trade.symbol);
             const closePrice = currentPrice ? parseFloat(currentPrice.bid) : trade.entryPrice;
             const pnl = (closePrice - trade.entryPrice) * trade.lotSize * 100;
-            await this.closeTradeLocally(tradeId, strategyId, closePrice, pnl);
+            await this.closeTradeLocally(tradeId, strategyId, closePrice, pnl, reason);
             return;
           }
 
@@ -481,7 +484,8 @@ class TradeManager {
             closePrice,
             pnl,
             pnlPercent: trade.entryPrice > 0 ? (pnl / (trade.entryPrice * trade.lotSize)) * 100 : 0,
-            peakPrice: peakPrice || undefined
+            peakPrice: peakPrice || undefined,
+            closeReason: reason
           });
         } else {
           // PAPER: Close locally
@@ -496,7 +500,8 @@ class TradeManager {
             closePrice,
             pnl,
             pnlPercent: trade.entryPrice > 0 ? (pnl / (trade.entryPrice * trade.lotSize)) * 100 : 0,
-            peakPrice: peakPrice || undefined
+            peakPrice: peakPrice || undefined,
+            closeReason: reason
           });
         }
 
@@ -562,7 +567,7 @@ class TradeManager {
           // Trade is in profit - close it
           console.log(`[TradeManager] handleSecureProfitsReply [${strategy.name}] - Trade is in profit, closing...`);
           await logger.log('message_received', `Reply "secure ur profits" detected. Trade ${matchingTradeId} (${strategy.name}) is in profit ($${pnl.toFixed(2)}), closing...`);
-          await this.closeTradeManually(matchingTradeId);
+          await this.closeTradeManually(matchingTradeId, 'Secure Profits Reply');
         } else {
           // Trade is not in profit - skip closing
           console.log(`[TradeManager] handleSecureProfitsReply [${strategy.name}] - Trade NOT in profit, skipping close`);
