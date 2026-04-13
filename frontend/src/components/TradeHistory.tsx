@@ -165,6 +165,9 @@ export const TradeHistory: React.FC<TradeHistoryProps> = ({ trades, strategies }
       const name = strategyMap.get(id) ||
         trades.find(t => t.strategyId === id)?.strategyName ||
         'Unknown';
+      // If strategy was deleted but trade has a stored name, append (Deleted)
+      const isDeleted = !strategyMap.has(id) && tradeStrategyIds.has(id);
+      const displayName = isDeleted && name !== 'Unknown' ? `${name}(Deleted)` : name;
 
       const stratTrades = trades.filter(t => t.strategyId === id);
 
@@ -181,7 +184,7 @@ export const TradeHistory: React.FC<TradeHistoryProps> = ({ trades, strategies }
 
       rows.push({
         strategyId: id,
-        strategyName: name,
+        strategyName: displayName,
         spotPnlSum: pnlPercents.reduce((a, b) => a + b, 0),
         spotPnlAvg: pnlPercents.length > 0 ? pnlPercents.reduce((a, b) => a + b, 0) / pnlPercents.length : 0,
         totalTrades: stratTrades.length,

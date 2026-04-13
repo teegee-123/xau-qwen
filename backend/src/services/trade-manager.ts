@@ -208,6 +208,7 @@ class TradeManager {
         status: 'OPEN' as const,
         mode: mode as 'LIVE' | 'PAPER',
         strategyId: strategy.id,
+        strategyName: strategy.name,
         matchedMessage: {
           initial: message
         },
