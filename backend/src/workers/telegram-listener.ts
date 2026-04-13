@@ -101,16 +101,24 @@ class TelegramListenerWorker {
       console.log('[Listener] Event.message:', event?.message);
       console.log('[Listener] Event.chatId:', event?.chatId);
       console.log('[Listener] Event.isEdited:', event?.isEdited);
-      
+
       const text = event.message?.text || '';
       const messageId = event.message?.id?.toString() || '';
       const channelId = event.chatId?.toString() || '';
       const isEdited = event.isEdited || false;
+      const replyTo = event.message?.replyTo || null;
 
-      console.log('[Listener] Parsed - Text length:', text.length, 'MessageId:', messageId, 'ChannelId:', channelId, 'IsEdited:', isEdited);
+      console.log('[Listener] Parsed - Text length:', text.length, 'MessageId:', messageId, 'ChannelId:', channelId, 'IsEdited:', isEdited, 'HasReplyTo:', !!replyTo);
 
       if (!text) {
         console.log('[Listener] handleMessage - SKIP: No text');
+        return;
+      }
+
+      // Check if this is a reply message (not edited)
+      if (!isEdited && replyTo) {
+        console.log('[Listener] Routing to handleReplyMessage');
+        await this.handleReplyMessage(messageId, text, channelId, replyTo);
         return;
       }
 
@@ -121,12 +129,48 @@ class TelegramListenerWorker {
         console.log('[Listener] Routing to handleNewMessage');
         await this.handleNewMessage(messageId, text, channelId);
       }
-      
+
       console.log('[Listener] ====== handleMessage EXIT ======');
     } catch (error: any) {
       await logger.log('message_ignored', `Error handling message: ${error.message}`);
       console.error(`[Telegram Listener] Error handling message: ${error.message}`);
       console.error('[Telegram Listener] Error stack:', error.stack);
+    }
+  }
+
+  private async handleReplyMessage(messageId: string, text: string, channelId: string, replyTo: any): Promise<void> {
+    try {
+      console.log('[Listener] handleReplyMessage - ID:', messageId, 'Channel:', channelId, 'Text:', text.substring(0, 100));
+
+      // Check if listenToReplies is enabled
+      const config = await getConfig();
+      if (!config.trading?.listenToReplies) {
+        console.log('[Listener] handleReplyMessage - listenToReplies is OFF, ignoring');
+        return;
+      }
+
+      // Check if reply text contains "secure ur profits" (case-insensitive)
+      const secureProfitsRegex = /secure\s+ur\s+profits/i;
+      if (!secureProfitsRegex.test(text)) {
+        console.log('[Listener] handleReplyMessage - Reply text does not match "secure ur profits", ignoring');
+        return;
+      }
+
+      // Extract the message ID being replied to
+      const repliedToMsgId = replyTo.replyToMsgId?.toString() || '';
+      if (!repliedToMsgId) {
+        console.log('[Listener] handleReplyMessage - No repliedToMsgId found, ignoring');
+        return;
+      }
+
+      console.log('[Listener] handleReplyMessage - Matched "secure ur profits", repliedToMsgId:', repliedToMsgId);
+      await logger.log('message_received', `Reply detected: "secure ur profits" replying to message ${repliedToMsgId}`);
+
+      // Notify trade manager to check if trade is in profit and close it
+      await tradeManager.handleSecureProfitsReply(repliedToMsgId);
+    } catch (error: any) {
+      await logger.log('message_ignored', `Error handling reply message: ${error.message}`);
+      console.error(`[Telegram Listener] Error in handleReplyMessage: ${error.message}`);
     }
   }
 

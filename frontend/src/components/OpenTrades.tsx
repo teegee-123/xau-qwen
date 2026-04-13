@@ -19,6 +19,9 @@ interface Trade {
   channelId?: string;
   telegramMessageId?: string;
   peakPrice?: number;
+  strategyId?: string;
+  strategyName?: string;
+  mode?: 'LIVE' | 'PAPER';
 }
 
 interface PriceUpdate {
@@ -182,6 +185,7 @@ export const OpenTrades: React.FC<OpenTradesProps> = ({ trades, onTradeClosed })
             <thead>
               <tr className="text-trade-gray border-b border-trade-card">
                 <th className="text-left py-2 px-2">Symbol</th>
+                <th className="text-left py-2 px-2">Strategy</th>
                 <th className="text-left py-2 px-2">Type</th>
                 <th className="text-right py-2 px-2">Entry</th>
                 <th className="text-right py-2 px-2">SL</th>
@@ -205,6 +209,18 @@ export const OpenTrades: React.FC<OpenTradesProps> = ({ trades, onTradeClosed })
                 return (
                   <tr key={trade.id} className="border-b border-trade-card hover:bg-trade-card transition-colors relative">
                     <td className="py-2 px-2 font-medium">{trade.symbol}</td>
+                    <td className="py-2 px-2">
+                      <span className="text-white text-xs">{trade.strategyName || 'Unknown'}</span>
+                      {trade.mode && (
+                        <span className={`ml-1 text-[10px] px-1.5 py-0.5 rounded font-semibold ${
+                          trade.mode === 'LIVE'
+                            ? 'bg-trade-green/20 text-trade-green'
+                            : 'bg-yellow-500/20 text-yellow-400'
+                        }`}>
+                          {trade.mode}
+                        </span>
+                      )}
+                    </td>
                     <td className="py-2 px-2 text-trade-green">{trade.type}</td>
                     <td className="py-2 px-2 text-right">{formatPrice(trade.entryPrice)}</td>
                     <td className="py-2 px-2 text-right text-trade-red">{trade.sl ? formatPrice(trade.sl) : '-'}</td>

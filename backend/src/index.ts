@@ -11,6 +11,7 @@ import configRoutes from './api/config';
 import logsRoutes from './api/logs';
 import oandaRoutes from './api/oanda';
 import dataRoutes from './api/data';
+import strategiesRoutes from './api/strategies';
 import { telegramListenerWorker } from './workers/telegram-listener';
 import { oandaService } from './services/oanda.service';
 import { telegramService } from './services/telegram.service';
@@ -58,6 +59,7 @@ app.use('/api/config', configRoutes);
 app.use('/api/logs', logsRoutes);
 app.use('/api/oanda', oandaRoutes);
 app.use('/api/data', dataRoutes);
+app.use('/api/strategies', strategiesRoutes);
 
 // Express error-handling middleware (catches all API route errors)
 // eslint-disable-next-line @typescript-eslint/no-unused-vars

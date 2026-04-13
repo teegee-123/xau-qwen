@@ -93,14 +93,14 @@ class OandaService {
       // Auto-detect and correct gold symbol if needed
       try {
         const config = await getConfig();
-        const currentSymbol = config.trading.symbol;
+        const currentSymbol = config.trading?.symbol;
         
         // Find available gold instrument
         const goldInstrument = await this.findGoldInstrument();
         
         if (goldInstrument && goldInstrument !== currentSymbol) {
           console.log(`[OANDA] Auto-correcting trading symbol from '${currentSymbol}' to '${goldInstrument}'`);
-          config.trading.symbol = goldInstrument;
+          config.trading!.symbol = goldInstrument;
           await require('../storage/json-store').updateConfig({ trading: config.trading });
           await logger.log('message_received', `OANDA auto-corrected symbol to ${goldInstrument} (was ${currentSymbol})`);
         } else if (goldInstrument === currentSymbol) {

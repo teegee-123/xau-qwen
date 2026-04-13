@@ -18,7 +18,10 @@ interface Trade {
     initial: string;
     edited?: string;
   };
-  peakPrice?: number; // All Time High
+  peakPrice?: number;
+  strategyId?: string;
+  strategyName?: string;
+  mode?: 'LIVE' | 'PAPER';
 }
 
 interface TradeHistoryProps {
@@ -148,6 +151,7 @@ export const TradeHistory: React.FC<TradeHistoryProps> = ({ trades }) => {
             <thead>
               <tr className="text-trade-gray border-b border-trade-card">
                 <th className="text-left py-2 px-2">Symbol</th>
+                <th className="text-left py-2 px-2">Strategy</th>
                 <th className="text-left py-2 px-2">Type</th>
                 <th className="text-right py-2 px-2">Entry</th>
                 <th className="text-right py-2 px-2">Exit</th>
@@ -171,6 +175,18 @@ export const TradeHistory: React.FC<TradeHistoryProps> = ({ trades }) => {
                   onMouseLeave={() => setShowTooltip(null)}
                 >
                   <td className="py-2 px-2 font-medium">{trade.symbol}</td>
+                  <td className="py-2 px-2">
+                    <span className="text-white text-xs">{trade.strategyName || 'Unknown'}</span>
+                    {trade.mode && (
+                      <span className={`ml-1 text-[10px] px-1.5 py-0.5 rounded font-semibold ${
+                        trade.mode === 'LIVE'
+                          ? 'bg-trade-green/20 text-trade-green'
+                          : 'bg-yellow-500/20 text-yellow-400'
+                      }`}>
+                        {trade.mode}
+                      </span>
+                    )}
+                  </td>
                   <td className="py-2 px-2 text-trade-green">{trade.type}</td>
                   <td className="py-2 px-2 text-right">{formatPrice(trade.entryPrice)}</td>
                   <td className="py-2 px-2 text-right">{trade.closePrice ? formatPrice(trade.closePrice) : '-'}</td>

@@ -2,12 +2,29 @@ import React, { useState, useEffect } from 'react';
 import { ExternalLink, AlertCircle, CheckCircle, Loader2, Info, AlertTriangle } from 'lucide-react';
 import { fetchWithTimeout } from '../utils/fetch';
 import { NukeModal } from './NukeModal';
+import { StrategyManager } from './StrategyManager';
 
 interface FetchedMessage {
   id: number;
   text: string;
   date: string;
   isEdited: boolean;
+}
+
+export interface Strategy {
+  id: string;
+  name: string;
+  isActive: boolean;
+  channels: string[];
+  trading: {
+    lotSize: number;
+    symbol: string;
+    closeTimeoutMinutes: number;
+    maxRetries: number;
+    retryDelayMs: number;
+    trailingStopDistance: number;
+    listenToReplies: boolean;
+  };
 }
 
 interface Config {
@@ -33,6 +50,7 @@ interface Config {
     maxRetries: number;
     retryDelayMs: number;
     trailingStopDistance?: number;
+    listenToReplies?: boolean;
   };
   messages: {
     initialPattern: string;
@@ -194,9 +212,11 @@ const FetchMessages: React.FC<FetchMessagesProps> = ({ config }) => {
 
 interface ConfigPanelProps {
   onSave: (config: Partial<Config>) => void;
+  strategies: Strategy[];
+  onStrategiesChange: () => void;
 }
 
-export const ConfigPanel: React.FC<ConfigPanelProps> = ({ onSave }) => {
+export const ConfigPanel: React.FC<ConfigPanelProps> = ({ onSave, strategies, onStrategiesChange }) => {
   const [config, setConfig] = useState<Config | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -319,14 +339,6 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ onSave }) => {
     setConfig({
       ...config,
       oanda: { ...config.oanda, [key]: value }
-    });
-  };
-
-  const updateTrading = (key: string, value: any) => {
-    if (!config) return;
-    setConfig({
-      ...config,
-      trading: { ...config.trading, [key]: value }
     });
   };
 
@@ -967,63 +979,11 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ onSave }) => {
         </div>
       </div>
 
-      {/* Trading Config */}
-      <div className="space-y-3">
-        <h4 className="text-trade-green text-sm font-medium">Trading</h4>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <div>
-            <label className="block text-xs text-trade-gray mb-1">Lot Size</label>
-            <input
-              type="number"
-              step="0.01"
-              value={config.trading.lotSize}
-              onChange={(e) => updateTrading('lotSize', parseFloat(e.target.value))}
-              className="w-full bg-trade-card border border-trade-gray rounded px-3 py-2 text-sm"
-            />
-          </div>
-          <div>
-            <label className="block text-xs text-trade-gray mb-1">Symbol</label>
-            <input
-              type="text"
-              value={config.trading.symbol}
-              onChange={(e) => updateTrading('symbol', e.target.value)}
-              className="w-full bg-trade-card border border-trade-gray rounded px-3 py-2 text-sm"
-            />
-          </div>
-          <div>
-            <label className="block text-xs text-trade-gray mb-1">Close Timeout (min)</label>
-            <input
-              type="number"
-              value={config.trading.closeTimeoutMinutes}
-              onChange={(e) => updateTrading('closeTimeoutMinutes', parseInt(e.target.value))}
-              className="w-full bg-trade-card border border-trade-gray rounded px-3 py-2 text-sm"
-            />
-          </div>
-          <div>
-            <label className="block text-xs text-trade-gray mb-1">Trailing Stop Loss Distance (points)</label>
-            <input
-              type="number"
-              step="0.01"
-              value={config.trading.trailingStopDistance || ''}
-              onChange={(e) => updateTrading('trailingStopDistance', parseFloat(e.target.value) || 0)}
-              placeholder="0 = disabled"
-              className="w-full bg-trade-card border border-trade-gray rounded px-3 py-2 text-sm"
-            />
-            <p className="text-xs text-trade-gray mt-1">
-              When set, SL trails behind the highest price by this distance. TP is disabled.
-            </p>
-          </div>
-          <div>
-            <label className="block text-xs text-trade-gray mb-1">Max Retries</label>
-            <input
-              type="number"
-              value={config.trading.maxRetries}
-              onChange={(e) => updateTrading('maxRetries', parseInt(e.target.value))}
-              className="w-full bg-trade-card border border-trade-gray rounded px-3 py-2 text-sm"
-            />
-          </div>
-        </div>
-      </div>
+      {/* Strategies */}
+      <StrategyManager
+        strategies={strategies}
+        onStrategiesChange={onStrategiesChange}
+      />
 
       {/* Danger Zone */}
       <div className="border-2 border-trade-red/50 rounded-lg p-4">

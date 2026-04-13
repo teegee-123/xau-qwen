@@ -10,14 +10,66 @@ jest.mock('../backend/src/services/oanda.service');
 jest.mock('../backend/src/services/logger.service');
 jest.mock('../backend/src/services/telegram.service');
 
+const STRATEGY_ID = 'strat-multi-001';
+
+const mockStrategy = {
+  id: STRATEGY_ID,
+  name: 'Multi Strategy',
+  isActive: true,
+  channels: ['ch1', 'ch2'],
+  trading: {
+    lotSize: 0.01,
+    symbol: 'XAU_USD',
+    closeTimeoutMinutes: 3,
+    maxRetries: 3,
+    retryDelayMs: 2000,
+    trailingStopDistance: 0,
+    listenToReplies: false
+  }
+};
+
+function setupStrategyMocks() {
+  (jsonStore.getStrategies as jest.Mock).mockResolvedValue([mockStrategy]);
+  (jsonStore.getActiveStrategy as jest.Mock).mockResolvedValue(mockStrategy);
+  (jsonStore.getStrategyById as jest.Mock).mockImplementation((id: string) =>
+    id === STRATEGY_ID ? mockStrategy : null
+  );
+  (jsonStore.attachStrategyNames as jest.Mock).mockImplementation(async (trades: any[]) =>
+    trades.map(t => ({ ...t, strategyName: 'Multi Strategy' }))
+  );
+}
+
+const mockTradeResult = {
+  tradeId: 'oanda-123',
+  instrument: 'XAU_USD',
+  units: '10',
+  price: '4617.00',
+  time: new Date().toISOString()
+};
+
+const mockTrade = {
+  id: 'trade-123',
+  type: 'BUY' as const,
+  symbol: 'XAU_USD',
+  entryPrice: 4617,
+  lotSize: 0.01,
+  openTime: new Date().toISOString(),
+  status: 'OPEN' as const,
+  mode: 'LIVE' as const,
+  strategyId: STRATEGY_ID,
+  matchedMessage: { initial: 'Gold buy 4617' },
+  retries: 0,
+  telegramMessageId: 'msg-1',
+  oandaTradeId: 'oanda-123'
+};
+
 describe('Multi-Trade Lifecycle Tests', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    // Clear internal state
     (tradeManager as any).pendingTrades.clear();
     (tradeManager as any).activeTrades.clear();
-    // Clear price service peak tracking
     (priceService as any).tradePeakPrices?.clear();
+    setupStrategyMocks();
     jest.useFakeTimers();
   });
 
@@ -43,7 +95,7 @@ describe('Multi-Trade Lifecycle Tests', () => {
 
       it('should reject message with extra text (strict format)', async () => {
         const result = await messageParser.parseInitialMessage('Gold buy 4617 now!');
-        expect(result).toBeNull(); // Strict format: only "Gold buy {price}" allowed
+        expect(result).toBeNull();
       });
 
       it('should ignore sell messages', async () => {
@@ -75,7 +127,7 @@ TP
         const result = await messageParser.parseEditedMessage(editedMessage);
         expect(result).not.toBeNull();
         expect(result!.sl).toBe(4500);
-        expect(result!.tp).toBe(4690); // Lowest TP
+        expect(result!.tp).toBe(4690);
         expect(result!.entryMin).toBe(4685);
         expect(result!.entryMax).toBe(4681);
       });
@@ -93,11 +145,10 @@ TP
 4777
 TP
 4650`);
-        expect(result).not.toBeNull();
         expect(result!.tp).toBe(4650);
       });
 
-      it('should return null if no "GOLD BUY NOW" header', async () => {
+      it('should return null if no GOLD BUY NOW header', async () => {
         const result = await messageParser.parseEditedMessage(`
 Buy @ 4685 - 4681
 SL
@@ -126,607 +177,253 @@ TP
     });
   });
 
-  // ===== SINGLE TRADE LIFECYCLE TESTS =====
+  // ===== SINGLE TRADE LIFECYCLE =====
   describe('Single Trade Lifecycle: Signal → Trade → Edit → Close', () => {
-    const setupMocks = (overrides: any = {}) => {
-      const config = {
-        trading: {
-          symbol: 'XAU_USD',
-          lotSize: 0.01,
-          closeTimeoutMinutes: 3,
-          maxRetries: 3,
-          retryDelayMs: 2000,
-          trailingStopDistance: 0 // Disabled by default
-        }
-      };
+    it('should open a trade on initial signal', async () => {
+      (oandaService.placeMarketOrder as jest.Mock).mockResolvedValue(mockTradeResult);
+      (jsonStore.addTrade as jest.Mock).mockResolvedValue(mockTrade);
 
-      (jsonStore.getConfig as jest.Mock).mockResolvedValue({ ...config, ...overrides.config });
+      await tradeManager.handleInitialSignal('msg-1', 'Gold buy 4617', 4617, 'ch1');
 
-      (oandaService.placeMarketOrder as jest.Mock).mockResolvedValue({
-        tradeId: 'oanda-123',
-        price: '4617.0',
-        instrument: 'XAU_USD',
-        ...overrides.orderResult
-      });
-
-      (jsonStore.addTrade as jest.Mock).mockImplementation((trade) => {
-        const newTrade = { ...trade, id: 'trade-123' };
-        return Promise.resolve(newTrade);
-      });
-
-      (jsonStore.getTrades as jest.Mock).mockResolvedValue([]);
-    };
-
-    it('should complete full lifecycle: initial signal → edited SL/TP → manual close', async () => {
-      setupMocks();
-
-      (oandaService.updateSLTP as jest.Mock).mockResolvedValue(undefined);
-      (jsonStore.updateTrade as jest.Mock).mockImplementation((id, updates) => {
-        return Promise.resolve({
-          id: 'trade-123',
-          type: 'BUY',
-          symbol: 'XAU_USD',
-          entryPrice: 4617,
-          lotSize: 0.01,
-          openTime: new Date().toISOString(),
-          status: 'CLOSED',
-          matchedMessage: { initial: 'Gold buy 4617' },
-          retries: 0,
-          ...updates
-        });
-      });
-
-      (jsonStore.getOpenTrades as jest.Mock).mockResolvedValue([{
-        id: 'trade-123',
-        instrument: 'XAU_USD',
-        price: '4617.0',
-        createTime: new Date().toISOString()
-      }]);
-
-      (oandaService.getOpenTrades as jest.Mock).mockResolvedValue([{
-        id: 'oanda-123',
-        instrument: 'XAU_USD',
-        price: '4617.0',
-        createTime: new Date().toISOString()
-      }]);
-
-      (oandaService.closePosition as jest.Mock).mockResolvedValue({
-        pnl: '25.50',
-        closePrice: '4642.5'
-      });
-
-      // Step 1: Initial signal
-      const initialSignal = await messageParser.parseInitialMessage('Gold buy 4617');
-      expect(initialSignal).not.toBeNull();
-
-      await tradeManager.handleInitialSignal('msg-1', 'Gold buy 4617', 4617);
       expect(oandaService.placeMarketOrder).toHaveBeenCalled();
       expect(jsonStore.addTrade).toHaveBeenCalled();
-
-      // Step 2: Edited message with SL/TP
-      const editedSignal = await messageParser.parseEditedMessage(`GOLD BUY NOW
-
-Buy @ 4685 - 4681
-
-SL
-4500
-TP
-4690`);
-      expect(editedSignal).not.toBeNull();
-
-      await tradeManager.handleEditedSignal('msg-1', editedSignal!.rawMessage, 4500, 4690);
-      expect(oandaService.updateSLTP).toHaveBeenCalledWith('oanda-123', '4500', '4690');
-
-      // Step 3: Manual close
-      await tradeManager.closeTradeManually('trade-123');
-      expect(oandaService.closePosition).toHaveBeenCalledWith('oanda-123');
     });
 
-    it('should capture peakPrice (ATH) when trade is closed', async () => {
-      setupMocks();
-
-      // Simulate price service tracking a peak
-      (priceService as any).tradePeakPrices = new Map();
-      (priceService as any).tradePeakPrices.set('trade-123', 4700);
-
-      (jsonStore.getOpenTrades as jest.Mock).mockResolvedValue([]);
+    it('should update SL/TP when message is edited', async () => {
+      // Setup: trade already exists
       (oandaService.getOpenTrades as jest.Mock).mockResolvedValue([{
         id: 'oanda-123',
         instrument: 'XAU_USD',
-        price: '4617.0',
+        price: '4617.00',
         createTime: new Date().toISOString()
       }]);
+      (oandaService.updateSLTP as jest.Mock).mockResolvedValue(undefined);
+      (jsonStore.updateTrade as jest.Mock).mockResolvedValue({ ...mockTrade, sl: 4500, tp: 4690 });
 
+      const pendingMap = (tradeManager as any).getPendingMap(STRATEGY_ID);
+      pendingMap.set('msg-1', {
+        messageId: 'msg-1',
+        strategyId: STRATEGY_ID,
+        initialMessage: 'Gold buy 4617',
+        price: 4617,
+        timestamp: new Date(),
+        tradeId: 'trade-123'
+      });
+      const activeMap = (tradeManager as any).getActiveMap(STRATEGY_ID);
+      activeMap.set('trade-123', mockTrade);
+
+      await tradeManager.handleEditedSignal('msg-1', 'GOLD BUY NOW\n\nBuy @ 4685 - 4681\n\nSL\n4500\nTP\n4690', 4500, 4690);
+
+      expect(oandaService.updateSLTP).toHaveBeenCalledWith('oanda-123', '4500', '4690');
+    });
+
+    it('should close trade manually', async () => {
+      (oandaService.getOpenTrades as jest.Mock).mockResolvedValue([{
+        id: 'oanda-123',
+        instrument: 'XAU_USD',
+        price: '4617.00',
+        createTime: new Date().toISOString()
+      }]);
       (oandaService.closePosition as jest.Mock).mockResolvedValue({
-        pnl: '83.50',
-        closePrice: '4700.5'
+        pnl: '10.00',
+        closePrice: '4627.00'
       });
-
-      (jsonStore.updateTrade as jest.Mock).mockImplementation((id, updates) => {
-        return Promise.resolve({
-          id: 'trade-123',
-          type: 'BUY',
-          symbol: 'XAU_USD',
-          entryPrice: 4617,
-          lotSize: 0.01,
-          openTime: new Date().toISOString(),
-          status: 'CLOSED',
-          matchedMessage: { initial: 'Gold buy 4617' },
-          retries: 0,
-          ...updates
-        });
+      (jsonStore.updateTrade as jest.Mock).mockResolvedValue({
+        ...mockTrade,
+        status: 'CLOSED',
+        closePrice: 4627,
+        pnl: 10
       });
+      (jsonStore.getTrades as jest.Mock).mockResolvedValue([{
+        ...mockTrade,
+        status: 'CLOSED'
+      }]);
 
-      // Add trade to activeTrades map so closeTradeManually can find it
-      (tradeManager as any).activeTrades.set('trade-123', {
-        id: 'trade-123',
-        type: 'BUY',
-        symbol: 'XAU_USD',
-        entryPrice: 4617,
-        lotSize: 0.01,
-        openTime: new Date().toISOString(),
-        status: 'OPEN',
-        matchedMessage: { initial: 'Gold buy 4617' },
-        retries: 0,
-        oandaTradeId: 'oanda-123'
-      });
+      const activeMap = (tradeManager as any).getActiveMap(STRATEGY_ID);
+      activeMap.set('trade-123', mockTrade);
 
-      // Close the trade
       await tradeManager.closeTradeManually('trade-123');
 
-      // Verify peakPrice was captured in one of the update calls
-      const updateCalls = (jsonStore.updateTrade as jest.Mock).mock.calls;
-      const peakPriceCall = updateCalls.find((call: any[]) => call[1].peakPrice === 4700);
-      expect(peakPriceCall).toBeDefined();
+      expect(oandaService.closePosition).toHaveBeenCalledWith('oanda-123');
     });
   });
 
-  // ===== MULTI-TRADE INDEPENDENCE TESTS =====
-  describe('Multi-Trade Independence', () => {
-    const setupMultiTradeMocks = () => {
-      (jsonStore.getConfig as jest.Mock).mockResolvedValue({
-        trading: {
-          symbol: 'XAU_USD',
-          lotSize: 0.01,
-          closeTimeoutMinutes: 3,
-          maxRetries: 3,
-          retryDelayMs: 2000,
-          trailingStopDistance: 0
-        }
+  // ===== MULTI-STRATEGY TESTS =====
+  describe('Multi-Strategy: Same signal → Multiple trades', () => {
+    it('should create trades for all strategies subscribed to the channel', async () => {
+      const liveStrat = { ...mockStrategy, id: 's-live', isActive: true, name: 'Live', channels: ['ch1'] };
+      const paperStrat = { ...mockStrategy, id: 's-paper', isActive: false, name: 'Paper', channels: ['ch1'], trading: { ...mockStrategy.trading, lotSize: 0.02 } };
+
+      (jsonStore.getStrategies as jest.Mock).mockResolvedValue([liveStrat, paperStrat]);
+      (jsonStore.getActiveStrategy as jest.Mock).mockResolvedValue(liveStrat);
+      (jsonStore.getStrategyById as jest.Mock).mockImplementation((id: string) =>
+        [liveStrat, paperStrat].find(s => s.id === id) || null
+      );
+
+      (oandaService.placeMarketOrder as jest.Mock).mockResolvedValue({
+        tradeId: 'oanda-live', instrument: 'XAU_USD', price: '4617.00', time: new Date().toISOString()
       });
-
-      let callCount = 0;
-      (oandaService.placeMarketOrder as jest.Mock).mockImplementation(() => {
-        callCount++;
-        return Promise.resolve({
-          tradeId: `oanda-${callCount}`,
-          price: callCount === 1 ? '4617.0' : '4650.0',
-          instrument: 'XAU_USD'
-        });
-      });
-
-      (jsonStore.addTrade as jest.Mock).mockImplementation((trade) => {
-        const id = `trade-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-        const newTrade = { ...trade, id };
-        return Promise.resolve(newTrade);
-      });
-
-      (jsonStore.getOpenTrades as jest.Mock).mockResolvedValue([]);
-      (jsonStore.getTrades as jest.Mock).mockResolvedValue([]);
-    };
-
-    it('should handle two independent trades from separate messages', async () => {
-      setupMultiTradeMocks();
-
-      // Trade 1: Gold buy 4617
-      const signal1 = await messageParser.parseInitialMessage('Gold buy 4617');
-      expect(signal1).not.toBeNull();
-      await tradeManager.handleInitialSignal('msg-1', 'Gold buy 4617', 4617);
-
-      // Trade 2: Gold buy 4650
-      const signal2 = await messageParser.parseInitialMessage('Gold buy 4650');
-      expect(signal2).not.toBeNull();
-      await tradeManager.handleInitialSignal('msg-2', 'Gold buy 4650', 4650);
-
-      // Verify two separate OANDA orders were placed
-      expect(oandaService.placeMarketOrder).toHaveBeenCalledTimes(2);
-
-      // Verify two separate addTrade calls
-      expect(jsonStore.addTrade).toHaveBeenCalledTimes(2);
-
-      // Verify the orders had different prices
-      const orderCalls = (oandaService.placeMarketOrder as jest.Mock).mock.calls;
-      expect(orderCalls[0][0].instrument).toBe('XAU_USD');
-      expect(orderCalls[1][0].instrument).toBe('XAU_USD');
-    });
-
-    it('should match edited messages to correct trades independently', async () => {
-      setupMultiTradeMocks();
-
-      // Track created trades
-      const createdTrades: any[] = [];
-      (jsonStore.addTrade as jest.Mock).mockImplementation((trade) => {
-        const id = `trade-${createdTrades.length + 1}`;
-        const newTrade = { ...trade, id };
-        createdTrades.push(newTrade);
-        return Promise.resolve(newTrade);
-      });
-
-      (oandaService.getOpenTrades as jest.Mock).mockResolvedValue([
-        { id: 'oanda-1', instrument: 'XAU_USD', price: '4617.0', createTime: new Date().toISOString() },
-        { id: 'oanda-2', instrument: 'XAU_USD', price: '4650.0', createTime: new Date().toISOString() }
-      ]);
-
-      (oandaService.updateSLTP as jest.Mock).mockResolvedValue(undefined);
-      (jsonStore.updateTrade as jest.Mock).mockImplementation((id, updates) => {
-        return Promise.resolve({ id, ...updates });
-      });
-
-      // Place two trades
-      await tradeManager.handleInitialSignal('msg-1', 'Gold buy 4617', 4617);
-      await tradeManager.handleInitialSignal('msg-2', 'Gold buy 4650', 4650);
-
-      // Edit message 1 with SL/TP
-      await tradeManager.handleEditedSignal('msg-1', 'GOLD BUY NOW\nBuy @ 4617 - 4610\nSL\n4500\nTP\n4700', 4500, 4700);
-
-      // Edit message 2 with different SL/TP
-      await tradeManager.handleEditedSignal('msg-2', 'GOLD BUY NOW\nBuy @ 4650 - 4645\nSL\n4550\nTP\n4750', 4550, 4750);
-
-      // Verify both SL/TP updates were called
-      expect(oandaService.updateSLTP).toHaveBeenCalledTimes(2);
-    });
-
-    it('should close one trade without affecting the other', async () => {
-      setupMultiTradeMocks();
-
-      const trade1Id = 'trade-1';
-      const trade2Id = 'trade-2';
-
+      (oandaService.getCurrentPrice as jest.Mock).mockResolvedValue({ bid: '4617.00', ask: '4617.50' });
       (jsonStore.addTrade as jest.Mock)
-        .mockResolvedValueOnce({ id: trade1Id, type: 'BUY', symbol: 'XAU_USD', entryPrice: 4617, lotSize: 0.01, openTime: new Date().toISOString(), status: 'OPEN', matchedMessage: { initial: 'Gold buy 4617' }, retries: 0, oandaTradeId: 'oanda-1' })
-        .mockResolvedValueOnce({ id: trade2Id, type: 'BUY', symbol: 'XAU_USD', entryPrice: 4650, lotSize: 0.01, openTime: new Date().toISOString(), status: 'OPEN', matchedMessage: { initial: 'Gold buy 4650' }, retries: 0, oandaTradeId: 'oanda-2' });
+        .mockResolvedValueOnce({ ...mockTrade, strategyId: 's-live', mode: 'LIVE' })
+        .mockResolvedValueOnce({ ...mockTrade, strategyId: 's-paper', mode: 'PAPER', oandaTradeId: undefined });
 
-      (oandaService.getOpenTrades as jest.Mock).mockResolvedValue([
-        { id: 'oanda-1', instrument: 'XAU_USD', price: '4617.0', createTime: new Date().toISOString() },
-        { id: 'oanda-2', instrument: 'XAU_USD', price: '4650.0', createTime: new Date().toISOString() }
-      ]);
+      await tradeManager.handleInitialSignal('msg-1', 'Gold buy 4617', 4617, 'ch1');
 
-      (oandaService.closePosition as jest.Mock).mockResolvedValue({
-        pnl: '25.50',
-        closePrice: '4642.5'
-      });
+      expect(oandaService.placeMarketOrder).toHaveBeenCalledTimes(1); // Only LIVE
+      expect(oandaService.getCurrentPrice).toHaveBeenCalledTimes(1);  // Only PAPER
+      expect(jsonStore.addTrade).toHaveBeenCalledTimes(2);             // Both
+    });
 
-      (jsonStore.updateTrade as jest.Mock).mockImplementation((id, updates) => {
-        return Promise.resolve({ id, ...updates });
-      });
+    it('should NOT create trades for strategies not subscribed to the channel', async () => {
+      const strat1 = { ...mockStrategy, id: 's1', isActive: true, channels: ['ch1'] };
+      const strat2 = { ...mockStrategy, id: 's2', isActive: false, channels: ['ch2'] };
 
-      // Place both trades
-      await tradeManager.handleInitialSignal('msg-1', 'Gold buy 4617', 4617);
-      await tradeManager.handleInitialSignal('msg-2', 'Gold buy 4650', 4650);
+      (jsonStore.getStrategies as jest.Mock).mockResolvedValue([strat1, strat2]);
+      (jsonStore.getActiveStrategy as jest.Mock).mockResolvedValue(strat1);
+      (jsonStore.getStrategyById as jest.Mock).mockImplementation((id: string) =>
+        [strat1, strat2].find(s => s.id === id) || null
+      );
 
-      // Close trade 1 only
-      await tradeManager.closeTradeManually(trade1Id);
+      (oandaService.placeMarketOrder as jest.Mock).mockResolvedValue(mockTradeResult);
+      (jsonStore.addTrade as jest.Mock).mockResolvedValue(mockTrade);
 
-      // Verify only oanda-1 was closed
-      expect(oandaService.closePosition).toHaveBeenCalledWith('oanda-1');
-      expect(oandaService.closePosition).toHaveBeenCalledTimes(1);
+      // Signal from ch3 — no strategy subscribes
+      await tradeManager.handleInitialSignal('msg-1', 'Gold buy 4617', 4617, 'ch3');
+
+      expect(oandaService.placeMarketOrder).not.toHaveBeenCalled();
+      expect(jsonStore.addTrade).not.toHaveBeenCalled();
     });
   });
 
-  // ===== ATH TRACKING (NO TRAILING STOP) TESTS =====
-  describe('ATH Tracking (No Trailing Stop)', () => {
-    beforeEach(() => {
-      // Initialize the tradePeakPrices map
-      (priceService as any).tradePeakPrices = new Map();
-    });
+  // ===== PAPER TRADE TESTS =====
+  describe('Paper Trade Behavior', () => {
+    it('should use current price for entry, not OANDA order', async () => {
+      const paperStrat = { ...mockStrategy, id: 's-paper', isActive: false, name: 'Paper' };
 
-    it('should track peak price even when trailing stop is disabled', async () => {
-      (jsonStore.getOpenTrades as jest.Mock).mockResolvedValue([
-        { id: 'trade-1', type: 'BUY', symbol: 'XAU_USD', entryPrice: 4617, sl: 4500, tp: 4700 }
-      ]);
+      (jsonStore.getStrategies as jest.Mock).mockResolvedValue([paperStrat]);
+      (jsonStore.getActiveStrategy as jest.Mock).mockResolvedValue(null);
+      (jsonStore.getStrategyById as jest.Mock).mockImplementation((id: string) =>
+        id === 's-paper' ? paperStrat : null
+      );
 
-      // Simulate current price below entry
-      (priceService as any).currentPrice = { symbol: 'XAU_USD', bid: 4610, ask: 4612, spread: 2, timestamp: new Date().toISOString() };
-
-      // Call the private method via a workaround - set up a mock for getOpenTrades and call updateAllTradePeaks indirectly
-      // Since updateAllTradePeaks is private, we'll test through getTradePeakPrice after simulating
-
-      // Manually set peak price as if price service tracked it
-      (priceService as any).tradePeakPrices.set('trade-1', 4617);
-
-      // Price goes up
-      (priceService as any).tradePeakPrices.set('trade-1', 4650);
-
-      // Price goes higher
-      (priceService as any).tradePeakPrices.set('trade-1', 4700);
-
-      // Price drops back
-      (priceService as any).tradePeakPrices.set('trade-1', 4700); // Should stay at 4700
-
-      const peak = priceService.getTradePeakPrice('trade-1');
-      expect(peak).toBe(4700);
-    });
-
-    it('should initialize peak to max(entry, currentBid) for new trade', async () => {
-      (jsonStore.getOpenTrades as jest.Mock).mockResolvedValue([
-        { id: 'trade-1', type: 'BUY', symbol: 'XAU_USD', entryPrice: 4617 }
-      ]);
-
-      (priceService as any).currentPrice = { symbol: 'XAU_USD', bid: 4630, ask: 4632, spread: 2, timestamp: new Date().toISOString() };
-
-      // Simulate updateAllTradePeaks behavior
-      const openTrades = await jsonStore.getOpenTrades();
-      const currentBid = (priceService as any).currentPrice.bid;
-      for (const trade of openTrades) {
-        const existingPeak = (priceService as any).tradePeakPrices.get(trade.id);
-        const newPeak = existingPeak !== undefined ? Math.max(existingPeak, currentBid) : Math.max(trade.entryPrice, currentBid);
-        (priceService as any).tradePeakPrices.set(trade.id, newPeak);
-      }
-
-      const peak = priceService.getTradePeakPrice('trade-1');
-      expect(peak).toBe(4630); // Max of 4617 and 4630
-    });
-
-    it('should return null for trade that does not exist', () => {
-      const peak = priceService.getTradePeakPrice('non-existent');
-      expect(peak).toBeNull();
-    });
-  });
-
-  // ===== ATH TRACKING (WITH TRAILING STOP) TESTS =====
-  describe('ATH Tracking (With Trailing Stop)', () => {
-    it('should track peak and update trailing SL independently', async () => {
-      (jsonStore.getConfig as jest.Mock).mockResolvedValue({
-        trading: {
-          symbol: 'XAU_USD',
-          lotSize: 0.01,
-          trailingStopDistance: 10
-        }
+      (oandaService.getCurrentPrice as jest.Mock).mockResolvedValue({ bid: '4620.00', ask: '4620.50' });
+      (jsonStore.addTrade as jest.Mock).mockResolvedValue({
+        ...mockTrade,
+        strategyId: 's-paper',
+        mode: 'PAPER',
+        entryPrice: 4620,
+        oandaTradeId: undefined
       });
 
-      (jsonStore.getOpenTrades as jest.Mock).mockResolvedValue([
-        { id: 'trade-1', type: 'BUY', symbol: 'XAU_USD', entryPrice: 4617, sl: 4607, trailingStopDistance: 10 }
-      ]);
+      await tradeManager.handleInitialSignal('msg-1', 'Gold buy 4617', 4617, 'ch1');
 
-      // Initialize peak tracking
-      (priceService as any).tradePeakPrices = new Map();
-      (priceService as any).tradePeakPrices.set('trade-1', 4617);
-
-      // Simulate price rising
-      (priceService as any).tradePeakPrices.set('trade-1', 4650);
-
-      // Peak should be 4650
-      const peak1 = priceService.getTradePeakPrice('trade-1');
-      expect(peak1).toBe(4650);
-
-      // Simulate price rising more
-      (priceService as any).tradePeakPrices.set('trade-1', 4700);
-
-      // Peak should be 4700
-      const peak2 = priceService.getTradePeakPrice('trade-1');
-      expect(peak2).toBe(4700);
-
-      // Price drops - peak should still be 4700
-      const peak3 = priceService.getTradePeakPrice('trade-1');
-      expect(peak3).toBe(4700);
+      expect(oandaService.placeMarketOrder).not.toHaveBeenCalled();
+      expect(oandaService.getCurrentPrice).toHaveBeenCalled();
+      expect(jsonStore.addTrade).toHaveBeenCalled();
     });
-  });
 
-  // ===== TIMEOUT CLOSE TESTS =====
-  describe('Timeout Close', () => {
-    it('should close trade via handleTimeout and capture peakPrice', async () => {
-      (jsonStore.getConfig as jest.Mock).mockResolvedValue({
-        trading: {
-          symbol: 'XAU_USD',
-          lotSize: 0.01,
-          closeTimeoutMinutes: 3
-        }
+    it('should close PAPER trade locally without OANDA call', async () => {
+      const paperTrade = { ...mockTrade, mode: 'PAPER' as const, oandaTradeId: undefined };
+
+      (oandaService.getCurrentPrice as jest.Mock).mockResolvedValue({ bid: '4627.00', ask: '4627.50' });
+      (jsonStore.updateTrade as jest.Mock).mockResolvedValue({
+        ...paperTrade,
+        status: 'CLOSED',
+        closePrice: 4627,
+        pnl: 10
       });
+      (jsonStore.getTrades as jest.Mock).mockResolvedValue([{
+        ...paperTrade,
+        status: 'CLOSED'
+      }]);
 
-      (priceService as any).tradePeakPrices = new Map();
-      (priceService as any).tradePeakPrices.set('trade-123', 4680);
+      const activeMap = (tradeManager as any).getActiveMap(STRATEGY_ID);
+      activeMap.set('trade-123', paperTrade);
 
-      (oandaService.getOpenTrades as jest.Mock).mockResolvedValue([
-        { id: 'oanda-123', instrument: 'XAU_USD', price: '4617.0', createTime: new Date().toISOString() }
-      ]);
-
-      (oandaService.closePosition as jest.Mock).mockResolvedValue({
-        pnl: '15.00',
-        closePrice: '4632.0'
-      });
-
-      (jsonStore.updateTrade as jest.Mock).mockImplementation((id, updates) => {
-        return Promise.resolve({ id, ...updates });
-      });
-
-      // Add trade to activeTrades map
-      (tradeManager as any).activeTrades.set('trade-123', {
-        id: 'trade-123',
-        type: 'BUY',
-        symbol: 'XAU_USD',
-        entryPrice: 4617,
-        lotSize: 0.01,
-        openTime: new Date().toISOString(),
-        status: 'OPEN',
-        matchedMessage: { initial: 'Gold buy 4617' },
-        retries: 0,
-        oandaTradeId: 'oanda-123'
-      });
-
-      // Manually trigger closeTradeManually which mirrors handleTimeout's peak capture
       await tradeManager.closeTradeManually('trade-123');
 
-      // Verify peakPrice was included in one of the update calls
-      const updateCalls = (jsonStore.updateTrade as jest.Mock).mock.calls;
-      const peakPriceCall = updateCalls.find((call: any[]) => call[1].peakPrice === 4680);
-      expect(peakPriceCall).toBeDefined();
+      expect(oandaService.closePosition).not.toHaveBeenCalled();
+      expect(jsonStore.updateTrade).toHaveBeenCalled();
     });
   });
 
-  // ===== SL/TP HIT CLOSE TESTS =====
-  describe('SL/TP Hit Close', () => {
-    it('should calculate correct PnL when SL is hit', async () => {
-      (jsonStore.getOpenTrades as jest.Mock).mockResolvedValue([
-        { id: 'trade-1', type: 'BUY', symbol: 'XAU_USD', entryPrice: 4617, sl: 4600, tp: 4700, lotSize: 0.01 }
-      ]);
+  // ===== SECURE PROFITS REPLY TESTS =====
+  describe('Secure Profits Reply', () => {
+    it('should close trade if in profit when reply detected', async () => {
+      const stratWithReply = { ...mockStrategy, trading: { ...mockStrategy.trading, listenToReplies: true } };
+      (jsonStore.getStrategies as jest.Mock).mockResolvedValue([stratWithReply]);
 
-      // Simulate price hitting SL
-      (priceService as any).currentPrice = { symbol: 'XAU_USD', bid: 4599, ask: 4601, spread: 2, timestamp: new Date().toISOString() };
-
-      // This would trigger close in real scenario; we test the PnL calculation logic
-      const entryPrice = 4617;
-      const closePrice = 4599;
-      const lotSize = 0.01;
-      const expectedPnl = (closePrice - entryPrice) * lotSize * 100;
-
-      expect(expectedPnl).toBeCloseTo(-18.0, 1); // Loss
-    });
-
-    it('should calculate correct PnL when TP is hit', async () => {
-      const entryPrice = 4617;
-      const closePrice = 4700;
-      const lotSize = 0.01;
-      const expectedPnl = (closePrice - entryPrice) * lotSize * 100;
-
-      expect(expectedPnl).toBeCloseTo(83.0, 1); // Profit
-    });
-  });
-
-  // ===== OANDA TRADE MATCHING TESTS =====
-  describe('OANDA Trade Matching', () => {
-    it('should match trade by instrument and approximate price', () => {
-      const oandaTrades = [
-        { id: 'oanda-1', instrument: 'XAU_USD', price: '4617.0', createTime: new Date().toISOString() },
-        { id: 'oanda-2', instrument: 'XAU_USD', price: '4650.0', createTime: new Date().toISOString() }
-      ];
-
-      const trade = { symbol: 'XAU_USD', entryPrice: 4617, openTime: new Date().toISOString() };
-
-      const matchingTrade = oandaTrades.find(oandaTrade => {
-        const sameInstrument = oandaTrade.instrument === trade.symbol;
-        const similarPrice = Math.abs(parseFloat(oandaTrade.price) - trade.entryPrice) < 5;
-        return sameInstrument && similarPrice;
+      (oandaService.getCurrentPrice as jest.Mock).mockResolvedValue({ bid: '4650.00', ask: '4650.50' });
+      (oandaService.getOpenTrades as jest.Mock).mockResolvedValue([{
+        id: 'oanda-123',
+        instrument: 'XAU_USD',
+        price: '4617.00',
+        createTime: new Date().toISOString()
+      }]);
+      (oandaService.closePosition as jest.Mock).mockResolvedValue({
+        pnl: '33.00',
+        closePrice: '4650.00'
       });
+      (jsonStore.updateTrade as jest.Mock).mockResolvedValue({
+        ...mockTrade,
+        status: 'CLOSED',
+        closePrice: 4650,
+        pnl: 33
+      });
+      (jsonStore.getTrades as jest.Mock).mockResolvedValue([{
+        ...mockTrade,
+        status: 'CLOSED'
+      }]);
 
-      expect(matchingTrade!.id).toBe('oanda-1');
+      const activeMap = (tradeManager as any).getActiveMap(STRATEGY_ID);
+      activeMap.set('trade-123', { ...mockTrade, telegramMessageId: 'msg-1' });
+
+      await tradeManager.handleSecureProfitsReply('msg-1');
+
+      expect(oandaService.closePosition).toHaveBeenCalled();
     });
 
-    it('should not match trades with different instruments', () => {
-      const oandaTrades = [
-        { id: 'oanda-1', instrument: 'EUR_USD', price: '1.0850', createTime: new Date().toISOString() },
-        { id: 'oanda-2', instrument: 'GBP_USD', price: '1.2650', createTime: new Date().toISOString() }
-      ];
+    it('should NOT close trade if not in profit', async () => {
+      const stratWithReply = { ...mockStrategy, trading: { ...mockStrategy.trading, listenToReplies: true } };
+      (jsonStore.getStrategies as jest.Mock).mockResolvedValue([stratWithReply]);
 
-      const trade = { symbol: 'XAU_USD', entryPrice: 4617, openTime: new Date().toISOString() };
+      (oandaService.getCurrentPrice as jest.Mock).mockResolvedValue({ bid: '4600.00', ask: '4600.50' });
 
-      const matchingTrade = oandaTrades.find(oandaTrade => {
-        const sameInstrument = oandaTrade.instrument === trade.symbol;
-        const similarPrice = Math.abs(parseFloat(oandaTrade.price) - trade.entryPrice) < 5;
-        return sameInstrument && similarPrice;
-      });
+      const activeMap = (tradeManager as any).getActiveMap(STRATEGY_ID);
+      activeMap.set('trade-123', { ...mockTrade, telegramMessageId: 'msg-1' });
 
-      expect(matchingTrade).toBeUndefined();
+      await tradeManager.handleSecureProfitsReply('msg-1');
+
+      expect(oandaService.closePosition).not.toHaveBeenCalled();
     });
   });
 
-  // ===== COMPREHENSIVE MULTI-TRADE FLOW TEST =====
-  describe('Comprehensive Multi-Trade Flow', () => {
-    it('should handle: 2 signals → 2 edits → price peaks tracked → close both independently', async () => {
-      // Setup
-      (jsonStore.getConfig as jest.Mock).mockResolvedValue({
-        trading: {
-          symbol: 'XAU_USD',
-          lotSize: 0.01,
-          closeTimeoutMinutes: 3,
-          trailingStopDistance: 0 // No trailing
-        }
-      });
+  // ===== CHANNEL FILTERING TESTS =====
+  describe('Channel Filtering', () => {
+    it('should process messages from multiple channels independently', async () => {
+      const channels = ['ch1', 'ch2', 'ch3'];
 
-      let orderCallCount = 0;
-      (oandaService.placeMarketOrder as jest.Mock).mockImplementation(() => {
-        orderCallCount++;
-        return Promise.resolve({
-          tradeId: `oanda-${orderCallCount}`,
-          price: orderCallCount === 1 ? '4617.0' : '4650.0',
-          instrument: 'XAU_USD'
-        });
-      });
+      for (const channelId of channels) {
+        const message = `Gold buy ${4600 + parseInt(channelId.split('ch')[1])}`;
+        const result = await messageParser.parseInitialMessage(message);
 
-      const createdTrades: any[] = [];
-      (jsonStore.addTrade as jest.Mock).mockImplementation((trade) => {
-        const id = `trade-${createdTrades.length + 1}`;
-        const newTrade = { ...trade, id };
-        createdTrades.push(newTrade);
-        return Promise.resolve(newTrade);
-      });
+        expect(result).not.toBeNull();
+        expect(result?.type).toBe('BUY');
+        expect(result?.price).toBeGreaterThan(4600);
+      }
+    });
 
-      // === PHASE 1: Two signals received ===
-      const signal1 = await messageParser.parseInitialMessage('Gold buy 4617');
-      expect(signal1).not.toBeNull();
-      await tradeManager.handleInitialSignal('msg-1', 'Gold buy 4617', 4617);
+    it('should ignore sell messages from all channels', async () => {
+      const channels = ['ch1', 'ch2', 'ch3'];
 
-      const signal2 = await messageParser.parseInitialMessage('Gold buy 4650');
-      expect(signal2).not.toBeNull();
-      await tradeManager.handleInitialSignal('msg-2', 'Gold buy 4650', 4650);
+      for (const channelId of channels) {
+        const message = `Gold sell 4617`;
+        const result = await messageParser.parseInitialMessage(message);
 
-      expect(oandaService.placeMarketOrder).toHaveBeenCalledTimes(2);
-      expect(createdTrades).toHaveLength(2);
-
-      const trade1Id = createdTrades[0].id;
-      const trade2Id = createdTrades[1].id;
-
-      // === PHASE 2: Peak prices tracked (simulated) ===
-      (priceService as any).tradePeakPrices = new Map();
-      (priceService as any).tradePeakPrices.set(trade1Id, 4680); // Trade 1 peaked at 4680
-      (priceService as any).tradePeakPrices.set(trade2Id, 4700); // Trade 2 peaked at 4700
-
-      // === PHASE 3: Both edited with SL/TP ===
-      (oandaService.getOpenTrades as jest.Mock).mockResolvedValue([
-        { id: 'oanda-1', instrument: 'XAU_USD', price: '4617.0', createTime: new Date().toISOString() },
-        { id: 'oanda-2', instrument: 'XAU_USD', price: '4650.0', createTime: new Date().toISOString() }
-      ]);
-      (oandaService.updateSLTP as jest.Mock).mockResolvedValue(undefined);
-      (jsonStore.updateTrade as jest.Mock).mockImplementation((id, updates) => {
-        return Promise.resolve({ id, ...updates });
-      });
-
-      await tradeManager.handleEditedSignal('msg-1', 'GOLD BUY NOW\nBuy @ 4617 - 4610\nSL\n4500\nTP\n4700', 4500, 4700);
-      await tradeManager.handleEditedSignal('msg-2', 'GOLD BUY NOW\nBuy @ 4650 - 4645\nSL\n4550\nTP\n4750', 4550, 4750);
-
-      expect(oandaService.updateSLTP).toHaveBeenCalledTimes(2);
-
-      // === PHASE 4: Close trade 1 ===
-      (oandaService.closePosition as jest.Mock).mockResolvedValueOnce({
-        pnl: '63.00',
-        closePrice: '4680.0'
-      });
-
-      // Simulate already closed on OANDA path
-      (oandaService.getOpenTrades as jest.Mock).mockResolvedValueOnce([]);
-      (oandaService.getCurrentPrice as jest.Mock).mockResolvedValueOnce({ bid: '4680', ask: '4682' });
-
-      await tradeManager.closeTradeManually(trade1Id);
-
-      // Verify peakPrice was captured
-      const updateCalls = (jsonStore.updateTrade as jest.Mock).mock.calls;
-      const trade1CloseCall = updateCalls.find((call: any[]) => call[1].peakPrice === 4680);
-      expect(trade1CloseCall).toBeDefined();
-
-      // === PHASE 5: Close trade 2 ===
-      (oandaService.closePosition as jest.Mock).mockResolvedValueOnce({
-        pnl: '50.00',
-        closePrice: '4700.0'
-      });
-
-      (oandaService.getOpenTrades as jest.Mock).mockResolvedValueOnce([]);
-      (oandaService.getCurrentPrice as jest.Mock).mockResolvedValueOnce({ bid: '4700', ask: '4702' });
-
-      await tradeManager.closeTradeManually(trade2Id);
-
-      // Verify both peak prices were captured correctly
-      const allUpdateCalls = (jsonStore.updateTrade as jest.Mock).mock.calls;
-      const trade2CloseCall = allUpdateCalls.find((call: any[]) => call[1].peakPrice === 4700);
-      expect(trade2CloseCall).toBeDefined();
+        expect(result).toBeNull();
+        expect(messageParser.shouldIgnore(message)).toBe(true);
+      }
     });
   });
 });

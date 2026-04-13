@@ -1,48 +1,57 @@
 import { Router } from 'express';
-import { getTrades, getOpenTrades, getClosedTrades, updateTrade } from '../storage/json-store';
+import {
+  getTradesByStrategy,
+  getOpenTradesByStrategy,
+  getClosedTradesByStrategy,
+  attachStrategyNames,
+  updateTrade
+} from '../storage/json-store';
 import { tradeManager } from '../services/trade-manager';
 import { priceService } from '../services/price.service';
 import { logger } from '../services/logger.service';
 
 const router = Router();
 
-// Helper to merge in-memory peak price into trade objects
-const attachPeakPrice = (trades: any[]) => {
-    return trades.map(trade => {
-        // If peak not in DB, check memory
-        if (!trade.peakPrice) {
-            const peak = priceService.getTradePeakPrice(trade.id);
-            if (peak) trade.peakPrice = peak;
-        }
-        return trade;
-    });
+// Helper to merge in-memory peak price and strategy name into trade objects
+const enrichTrades = async (trades: any[]) => {
+  const withPeaks = trades.map(trade => {
+    if (!trade.peakPrice) {
+      const peak = priceService.getTradePeakPrice(trade.id);
+      if (peak) trade.peakPrice = peak;
+    }
+    return trade;
+  });
+  return attachStrategyNames(withPeaks);
 };
 
-// Get all trades
+// Get all trades (optionally filtered by strategy)
 router.get('/', async (req, res) => {
   try {
-    const trades = await getTrades();
-    res.json(attachPeakPrice(trades));
+    const { strategyId } = req.query;
+    const trades = await getTradesByStrategy(strategyId as string | undefined);
+    res.json(await enrichTrades(trades));
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Get open trades
+// Get open trades (optionally filtered by strategy)
 router.get('/open', async (req, res) => {
   try {
-    const trades = await tradeManager.getActiveTrades();
-    res.json(attachPeakPrice(trades));
+    const { strategyId } = req.query;
+    const trades = await getOpenTradesByStrategy(strategyId as string | undefined);
+    res.json(await enrichTrades(trades));
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Get closed trades
+// Get closed trades (optionally filtered by strategy)
 router.get('/closed', async (req, res) => {
   try {
-    const trades = await getClosedTrades();
-    res.json(attachPeakPrice(trades));
+    const { strategyId } = req.query;
+    const trades = await getClosedTradesByStrategy(strategyId as string | undefined);
+    res.json(await enrichTrades(trades));
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -60,11 +69,12 @@ router.post('/:id/close', async (req, res) => {
   }
 });
 
-// Get PnL history for chart
+// Get PnL history for chart (optionally filtered by strategy)
 router.get('/pnl-history', async (req, res) => {
   try {
-    const trades = await getClosedTrades();
-    
+    const { strategyId } = req.query;
+    const trades = await getClosedTradesByStrategy(strategyId as string | undefined);
+
     // Filter trades with PnL and sort by close time
     const pnlData = trades
       .filter(t => t.closeTime && t.pnl !== undefined)
@@ -75,7 +85,7 @@ router.get('/pnl-history', async (req, res) => {
         symbol: t.symbol,
         type: t.type
       }));
-    
+
     // Calculate cumulative PnL
     let cumulative = 0;
     const result = pnlData.map(d => {
@@ -85,7 +95,7 @@ router.get('/pnl-history', async (req, res) => {
         cumulative
       };
     });
-    
+
     res.json(result);
   } catch (error: any) {
     res.status(500).json({ error: error.message });

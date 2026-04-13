@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { StatusChips } from './components/StatusChips';
 import { LiveLogs } from './components/LiveLogs';
 import { OpenTrades } from './components/OpenTrades';
@@ -8,8 +8,25 @@ import { SetupGuide } from './components/SetupGuide';
 import { AccountBalance } from './components/AccountBalance';
 import { PnLChart } from './components/PnLChart';
 import { PriceDisplay } from './components/PriceDisplay';
+import { StrategySelector } from './components/StrategySelector';
 import { useSocket } from './hooks/useSocket';
 import { fetchWithTimeout } from './utils/fetch';
+
+export interface Strategy {
+  id: string;
+  name: string;
+  isActive: boolean;
+  channels: string[];
+  trading: {
+    lotSize: number;
+    symbol: string;
+    closeTimeoutMinutes: number;
+    maxRetries: number;
+    retryDelayMs: number;
+    trailingStopDistance: number;
+    listenToReplies: boolean;
+  };
+}
 
 interface Trade {
   id: string;
@@ -57,14 +74,100 @@ function App() {
   const [listenerStatus, setListenerStatus] = useState(false);
   const [openTrades, setOpenTrades] = useState<Trade[]>([]);
   const [closedTrades, setClosedTrades] = useState<Trade[]>([]);
+  const [strategies, setStrategies] = useState<Strategy[]>([]);
+  const [selectedStrategyId, setSelectedStrategyId] = useState<string>('all');
   const [accountInfo, setAccountInfo] = useState<AccountInfo | null>(null);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'config' | 'guide'>('dashboard');
   const [apiError, setApiError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const fetchStatus = async () => {
+    try {
+      const res = await fetchWithTimeout('/api/health', {}, 8000);
+      if (!res.ok) throw new Error('Health check failed');
+      const data = await res.json();
+
+      if (data.telegram && typeof data.telegram === 'object') {
+        setTelegramStatus(data.telegram);
+      } else {
+        setTelegramStatus({
+          isConnected: !!data.telegram,
+          authState: data.telegram ? 'authenticated' : 'disconnected'
+        });
+      }
+
+      setOandaConnected(!!data.oanda);
+      setListenerStatus(!!data.listener);
+
+      try {
+        const accountRes = await fetchWithTimeout('/api/oanda/account', {}, 8000);
+        if (accountRes.ok) {
+          setAccountInfo(await accountRes.json());
+        }
+      } catch (err) {
+        // Ignore account info fetch errors
+      }
+
+      setApiError(null);
+    } catch (error) {
+      console.error('Failed to fetch status:', error);
+      setApiError('Backend not connected. Make sure the server is running on port 8020.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchTrades = useCallback(async () => {
+    try {
+      const strategyParam = selectedStrategyId !== 'all' ? `?strategyId=${selectedStrategyId}` : '';
+      const [openRes, closedRes] = await Promise.all([
+        fetchWithTimeout(`/api/trades/open${strategyParam}`, {}, 8000),
+        fetchWithTimeout(`/api/trades/closed${strategyParam}`, {}, 8000)
+      ]);
+
+      if (!openRes.ok || !closedRes.ok) {
+        throw new Error('Failed to fetch trades');
+      }
+
+      const [openData, closedData] = await Promise.all([
+        openRes.json(),
+        closedRes.json()
+      ]);
+      setOpenTrades(openData);
+      setClosedTrades(closedData);
+    } catch (error) {
+      console.error('Failed to fetch trades:', error);
+    }
+  }, [selectedStrategyId]);
+
+  const fetchStrategies = async () => {
+    try {
+      const res = await fetchWithTimeout('/api/strategies', {}, 8000);
+      if (res.ok) {
+        const data = await res.json();
+        setStrategies(data);
+      }
+    } catch (error) {
+      console.error('Failed to fetch strategies:', error);
+    }
+  };
+
+  const fetchLogs = async () => {
+    try {
+      const res = await fetchWithTimeout('/api/logs?limit=100', {}, 8000);
+      if (res.ok) {
+        const data = await res.json();
+        setInitialLogs(data.logs);
+      }
+    } catch (error) {
+      console.error('Failed to fetch logs:', error);
+    }
+  };
+
   useEffect(() => {
     fetchStatus();
     fetchTrades();
+    fetchStrategies();
     fetchLogs();
 
     // Poll for updates every 5 seconds
@@ -74,7 +177,7 @@ function App() {
     }, 5000);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchTrades]);
 
   // Wire up Socket.IO events for real-time trade updates
   useEffect(() => {
@@ -108,87 +211,17 @@ function App() {
     return () => {
       socket.off('log');
     };
-  }, [socket]);
+  }, [socket, fetchTrades]);
 
   const handleTradeClosed = async () => {
     // Callback when a trade is manually closed from OpenTrades
     await fetchTrades();
   };
 
-  const fetchStatus = async () => {
-    try {
-      const res = await fetchWithTimeout('/api/health', {}, 8000);
-      if (!res.ok) throw new Error('Health check failed');
-      const data = await res.json();
-
-      // Handle new telegram status structure
-      if (data.telegram && typeof data.telegram === 'object') {
-        setTelegramStatus(data.telegram);
-      } else {
-        // Backward compatibility with boolean
-        setTelegramStatus({
-          isConnected: !!data.telegram,
-          authState: data.telegram ? 'authenticated' : 'disconnected'
-        });
-      }
-
-      setOandaConnected(!!data.oanda);
-      setListenerStatus(!!data.listener);
-      
-      // Fetch account info
-      try {
-        const accountRes = await fetchWithTimeout('/api/oanda/account', {}, 8000);
-        if (accountRes.ok) {
-          setAccountInfo(await accountRes.json());
-        }
-      } catch (err) {
-        // Ignore account info fetch errors
-      }
-      
-      setApiError(null);
-    } catch (error) {
-      console.error('Failed to fetch status:', error);
-      setApiError('Backend not connected. Make sure the server is running on port 8020.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const fetchTrades = async () => {
-    try {
-      const [openRes, closedRes] = await Promise.all([
-        fetchWithTimeout('/api/trades/open', {}, 8000),
-        fetchWithTimeout('/api/trades/closed', {}, 8000)
-      ]);
-
-      if (!openRes.ok || !closedRes.ok) {
-        throw new Error('Failed to fetch trades');
-      }
-
-      const [openData, closedData] = await Promise.all([
-        openRes.json(),
-        closedRes.json()
-      ]);
-      setOpenTrades(openData);
-      setClosedTrades(closedData);
-    } catch (error) {
-      console.error('Failed to fetch trades:', error);
-      // Don't show error for trades, just keep empty state
-    }
-  };
-
-  const fetchLogs = async () => {
-    try {
-      const res = await fetchWithTimeout('/api/logs?limit=100', {}, 8000);
-      if (res.ok) {
-        const data = await res.json();
-        setInitialLogs(data.logs);
-      }
-    } catch (error) {
-      console.error('Failed to fetch logs:', error);
-      // Silently fail — socket will provide real-time logs
-    }
-  };
+  // Re-fetch trades when selected strategy changes
+  useEffect(() => {
+    fetchTrades();
+  }, [selectedStrategyId]);
 
   const handleSaveConfig = async (config: any) => {
     try {
@@ -296,6 +329,13 @@ function App() {
             {/* PnL Chart */}
             <PnLChart />
 
+            {/* Strategy Selector */}
+            <StrategySelector
+              strategies={strategies}
+              selectedId={selectedStrategyId}
+              onChange={setSelectedStrategyId}
+            />
+
             {/* Open Trades */}
             <OpenTrades trades={openTrades} onTradeClosed={handleTradeClosed} />
 
@@ -306,7 +346,11 @@ function App() {
             <TradeHistory trades={closedTrades} />
           </>
         ) : activeTab === 'config' ? (
-          <ConfigPanel onSave={handleSaveConfig} />
+          <ConfigPanel
+            onSave={handleSaveConfig}
+            strategies={strategies}
+            onStrategiesChange={fetchStrategies}
+          />
         ) : (
           <SetupGuide />
         )}
