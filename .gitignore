@@ -54,3 +54,4 @@ tsconfig.tsbuildinfo
 .cache/
 .temp/
 tmp/
+backend/src/storage/data/strategies.json

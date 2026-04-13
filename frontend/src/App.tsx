@@ -343,7 +343,7 @@ function App() {
             <LiveLogs logs={logs} />
 
             {/* Trade History */}
-            <TradeHistory trades={closedTrades} />
+            <TradeHistory trades={closedTrades} strategies={strategies} />
           </>
         ) : activeTab === 'config' ? (
           <ConfigPanel

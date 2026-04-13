@@ -95,6 +95,8 @@ export interface Trade {
   trailingStopDistance?: number; // Distance in points for trailing SL (0 = disabled)
   // Price tracking
   peakPrice?: number; // Highest price reached during trade life (All Time High)
+  // Close tracking
+  closeReason?: string; // Why the trade was closed: "SL Hit", "TP Hit", "Manual Close", "Timeout", "Secure Profits Reply"
 }
 
 export async function getTrades(): Promise<Trade[]> {
@@ -177,10 +179,13 @@ export async function attachStrategyNames(trades: Trade[]): Promise<Trade[]> {
   strategies.forEach(s => strategyMap.set(s.id, s.name));
 
   return trades.map(trade => {
-    const strategyName = strategyMap.get(trade.strategyId);
+    const currentStrategyName = strategyMap.get(trade.strategyId);
+    // If strategy still exists, use its current name
+    // If deleted, use the stored name + (Deleted) suffix
+    const strategyName = currentStrategyName || (trade.strategyName ? `${trade.strategyName}(Deleted)` : 'Unknown(Deleted)');
     return {
       ...trade,
-      strategyName: strategyName || 'Deleted'
+      strategyName
     };
   });
 }

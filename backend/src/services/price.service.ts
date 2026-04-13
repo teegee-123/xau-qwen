@@ -339,7 +339,10 @@ class PriceService {
         // Only update if new SL is higher than current SL (trailing only moves up)
         if (newSL > state.currentSL) {
           console.log(`[PriceService] Trailing SL update for trade ${trade.id}: ${state.currentSL.toFixed(2)} -> ${newSL.toFixed(2)} (peak: ${state.peakPrice.toFixed(2)})`);
-          await logger.log('message_received', `Trailing SL updated for trade ${trade.id}: ${state.currentSL.toFixed(2)} -> ${newSL.toFixed(2)}`);
+          // Only log 0.1% of trailing SL updates to avoid spam
+          if (Math.random() < 0.001) {
+            await logger.log('message_received', `Trailing SL updated for trade ${trade.id}: ${state.currentSL.toFixed(2)} -> ${newSL.toFixed(2)}`);
+          }
 
           // Update on OANDA
           try {
@@ -384,12 +387,12 @@ class PriceService {
             console.log(`[PriceService] ⚠️ SL hit for trade ${trade.id}: ${currentBid} <= ${trade.sl}`);
             await logger.log('message_received', `SL hit for trade ${trade.id}: ${currentBid} <= ${trade.sl}`);
             this.recentlyCheckedTrades.add(trade.id);
-            await this.closeTradeWithRetry(trade.id);
+            await this.closeTradeWithRetry(trade.id, 'SL Hit');
           } else if (trade.tp && currentBid >= trade.tp) {
             console.log(`[PriceService] ✅ TP hit for trade ${trade.id}: ${currentBid} >= ${trade.tp}`);
             await logger.log('message_received', `TP hit for trade ${trade.id}: ${currentBid} >= ${trade.tp}`);
             this.recentlyCheckedTrades.add(trade.id);
-            await this.closeTradeWithRetry(trade.id);
+            await this.closeTradeWithRetry(trade.id, 'TP Hit');
           }
         }
         // For SELL trades: SL violated when ask >= SL, TP violated when ask <= TP
@@ -398,12 +401,12 @@ class PriceService {
             console.log(`[PriceService] ⚠️ SL hit for trade ${trade.id}: ${currentAsk} >= ${trade.sl}`);
             await logger.log('message_received', `SL hit for trade ${trade.id}: ${currentAsk} >= ${trade.sl}`);
             this.recentlyCheckedTrades.add(trade.id);
-            await this.closeTradeWithRetry(trade.id);
+            await this.closeTradeWithRetry(trade.id, 'SL Hit');
           } else if (trade.tp && currentAsk <= trade.tp) {
             console.log(`[PriceService] ✅ TP hit for trade ${trade.id}: ${currentAsk} <= ${trade.tp}`);
             await logger.log('message_received', `TP hit for trade ${trade.id}: ${currentAsk} <= ${trade.tp}`);
             this.recentlyCheckedTrades.add(trade.id);
-            await this.closeTradeWithRetry(trade.id);
+            await this.closeTradeWithRetry(trade.id, 'TP Hit');
           }
         }
       }
@@ -415,9 +418,9 @@ class PriceService {
   /**
    * Close a trade with retry logic
    */
-  private async closeTradeWithRetry(tradeId: string): Promise<void> {
+  private async closeTradeWithRetry(tradeId: string, reason: string = 'Manual Close'): Promise<void> {
     try {
-      await tradeManager.closeTradeManually(tradeId);
+      await tradeManager.closeTradeManually(tradeId, reason);
     } catch (error: any) {
       console.error(`[PriceService] Failed to close trade ${tradeId}:`, error.message);
       // If close fails, remove from recently checked so we can retry

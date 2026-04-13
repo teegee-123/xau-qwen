@@ -2,7 +2,7 @@ import { telegramService } from '../services/telegram.service';
 import { messageParser } from '../services/message-parser';
 import { tradeManager } from '../services/trade-manager';
 import { logger } from '../services/logger.service';
-import { getConfig } from '../storage/json-store';
+import { getConfig, getStrategies } from '../storage/json-store';
 
 // Track message edits - messageId -> initial signal
 const messageMap = new Map<string, {
@@ -142,9 +142,10 @@ class TelegramListenerWorker {
     try {
       console.log('[Listener] handleReplyMessage - ID:', messageId, 'Channel:', channelId, 'Text:', text.substring(0, 100));
 
-      // Check if listenToReplies is enabled
-      const config = await getConfig();
-      if (!config.trading?.listenToReplies) {
+      // Check if listenToReplies is enabled on any strategy
+      const strategies = await getStrategies();
+      const anyListeningToReplies = strategies.some(s => s.trading.listenToReplies);
+      if (!anyListeningToReplies) {
         console.log('[Listener] handleReplyMessage - listenToReplies is OFF, ignoring');
         return;
       }
