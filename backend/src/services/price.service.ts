@@ -339,7 +339,10 @@ class PriceService {
         // Only update if new SL is higher than current SL (trailing only moves up)
         if (newSL > state.currentSL) {
           console.log(`[PriceService] Trailing SL update for trade ${trade.id}: ${state.currentSL.toFixed(2)} -> ${newSL.toFixed(2)} (peak: ${state.peakPrice.toFixed(2)})`);
-          await logger.log('message_received', `Trailing SL updated for trade ${trade.id}: ${state.currentSL.toFixed(2)} -> ${newSL.toFixed(2)}`);
+          // Only log 0.1% of trailing SL updates to avoid spam
+          if (Math.random() < 0.001) {
+            await logger.log('message_received', `Trailing SL updated for trade ${trade.id}: ${state.currentSL.toFixed(2)} -> ${newSL.toFixed(2)}`);
+          }
 
           // Update on OANDA
           try {
