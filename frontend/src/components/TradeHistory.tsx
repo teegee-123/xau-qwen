@@ -172,7 +172,10 @@ export const TradeHistory: React.FC<TradeHistoryProps> = ({ trades, strategies }
       const stratTrades = trades.filter(t => t.strategyId === id);
 
       const pnls = stratTrades.map(t => t.pnl || 0);
-      const pnlPercents = stratTrades.map(t => t.pnlPercent || 0);
+      // Spot P&L % = raw entry-to-exit price change percentage
+      const spotPnlPercents = stratTrades
+        .filter(t => t.closePrice && t.entryPrice > 0)
+        .map(t => ((t.closePrice! - t.entryPrice) / t.entryPrice) * 100);
       const wins = stratTrades.filter(t => (t.pnl || 0) > 0);
       const losses = stratTrades.filter(t => (t.pnl || 0) <= 0);
 
@@ -185,8 +188,8 @@ export const TradeHistory: React.FC<TradeHistoryProps> = ({ trades, strategies }
       rows.push({
         strategyId: id,
         strategyName: displayName,
-        spotPnlSum: pnlPercents.reduce((a, b) => a + b, 0),
-        spotPnlAvg: pnlPercents.length > 0 ? pnlPercents.reduce((a, b) => a + b, 0) / pnlPercents.length : 0,
+        spotPnlSum: spotPnlPercents.reduce((a, b) => a + b, 0),
+        spotPnlAvg: spotPnlPercents.length > 0 ? spotPnlPercents.reduce((a, b) => a + b, 0) / spotPnlPercents.length : 0,
         totalTrades: stratTrades.length,
         winRate: stratTrades.length > 0 ? (wins.length / stratTrades.length) * 100 : 0,
         wins: wins.length,
@@ -210,7 +213,9 @@ export const TradeHistory: React.FC<TradeHistoryProps> = ({ trades, strategies }
     if (trades.length === 0) return null;
 
     const pnls = trades.map(t => t.pnl || 0);
-    const pnlPercents = trades.map(t => t.pnlPercent || 0);
+    const spotPnlPercents = trades
+      .filter(t => t.closePrice && t.entryPrice > 0)
+      .map(t => ((t.closePrice! - t.entryPrice) / t.entryPrice) * 100);
     const wins = trades.filter(t => (t.pnl || 0) > 0);
     const losses = trades.filter(t => (t.pnl || 0) <= 0);
     const winPnls = wins.map(t => t.pnl || 0);
@@ -221,8 +226,8 @@ export const TradeHistory: React.FC<TradeHistoryProps> = ({ trades, strategies }
     return {
       strategyId: '__total__',
       strategyName: 'Total',
-      spotPnlSum: pnlPercents.reduce((a, b) => a + b, 0),
-      spotPnlAvg: pnlPercents.length > 0 ? pnlPercents.reduce((a, b) => a + b, 0) / pnlPercents.length : 0,
+      spotPnlSum: spotPnlPercents.reduce((a, b) => a + b, 0),
+      spotPnlAvg: spotPnlPercents.length > 0 ? spotPnlPercents.reduce((a, b) => a + b, 0) / spotPnlPercents.length : 0,
       totalTrades: trades.length,
       winRate: trades.length > 0 ? (wins.length / trades.length) * 100 : 0,
       wins: wins.length,
